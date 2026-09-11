@@ -1,0 +1,104 @@
+{
+  "duration_seconds" : 19.874829931972791,
+  "frames" : [
+    {
+      "actual_seconds" : 1.8733333333333333,
+      "file" : "001.900.png",
+      "requested_seconds" : 1.8999999999999999
+    },
+    {
+      "actual_seconds" : 1.9066666666666667,
+      "file" : "001.933.png",
+      "requested_seconds" : 1.9333333333
+    },
+    {
+      "actual_seconds" : 1.9399999999999999,
+      "file" : "001.967.png",
+      "requested_seconds" : 1.9666666665999999
+    },
+    {
+      "actual_seconds" : 1.9733333333333334,
+      "file" : "002.000.png",
+      "requested_seconds" : 1.9999999999
+    },
+    {
+      "actual_seconds" : 2.0066666666666668,
+      "file" : "002.033.png",
+      "requested_seconds" : 2.0333333331999999
+    },
+    {
+      "actual_seconds" : 2.04,
+      "file" : "002.067.png",
+      "requested_seconds" : 2.0666666664999997
+    },
+    {
+      "actual_seconds" : 2.0733333333333333,
+      "file" : "002.100.png",
+      "requested_seconds" : 2.0999999998000001
+    },
+    {
+      "actual_seconds" : 2.1066666666666665,
+      "file" : "002.133.png",
+      "requested_seconds" : 2.1333333331
+    },
+    {
+      "actual_seconds" : 2.1400000000000001,
+      "file" : "002.167.png",
+      "requested_seconds" : 2.1666666663999998
+    },
+    {
+      "actual_seconds" : 2.1733333333333333,
+      "file" : "002.200.png",
+      "requested_seconds" : 2.1999999996999997
+    },
+    {
+      "actual_seconds" : 2.2066666666666666,
+      "file" : "002.233.png",
+      "requested_seconds" : 2.233333333
+    },
+    {
+      "actual_seconds" : 2.2400000000000002,
+      "file" : "002.267.png",
+      "requested_seconds" : 2.2666666662999999
+    },
+    {
+      "actual_seconds" : 2.2733333333333334,
+      "file" : "002.300.png",
+      "requested_seconds" : 2.2999999995999998
+    },
+    {
+      "actual_seconds" : 2.3066666666666666,
+      "file" : "002.333.png",
+      "requested_seconds" : 2.3333333328999997
+    },
+    {
+      "actual_seconds" : 2.3399999999999999,
+      "file" : "002.367.png",
+      "requested_seconds" : 2.3666666662
+    },
+    {
+      "actual_seconds" : 2.3733333333333335,
+      "file" : "002.400.png",
+      "requested_seconds" : 2.3999999994999999
+    },
+    {
+      "actual_seconds" : 2.4066666666666667,
+      "file" : "002.433.png",
+      "requested_seconds" : 2.4333333327999997
+    },
+    {
+      "actual_seconds" : 2.4399999999999999,
+      "file" : "002.467.png",
+      "requested_seconds" : 2.4666666661000001
+    },
+    {
+      "actual_seconds" : 2.4733333333333332,
+      "file" : "002.500.png",
+      "requested_seconds" : 2.4999999994
+    }
+  ],
+  "height" : 1920,
+  "nominal_fps" : 30.042774200439453,
+  "source" : "\/Users\/ldong-yeop\/Downloads\/1a088757f121031c.mp4",
+  "width" : 1080
+}
