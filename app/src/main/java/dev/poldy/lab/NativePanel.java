@@ -20,6 +20,7 @@ final class NativePanel implements AutoCloseable {
     private final int width,height;
     private Bitmap bitmap,previousBitmap,bakedBefore;
     private final Paint bakedPaint=new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final Paint preparationPaint=new Paint();
     private float amount,veil,contentMix=1,opacity=-1;
     private boolean inner,closed;
     boolean healthy=true;
@@ -29,15 +30,18 @@ final class NativePanel implements AutoCloseable {
     }
     void frame(Bitmap bitmap,boolean inner,float amount,float veil){blend(null,bitmap,1,inner,amount,veil);}
     void blend(Bitmap before,Bitmap current,float mix,boolean inner,float amount,float veil) {
+        requireNative(before);requireNative(current);
         bakedBefore=null;previousBitmap=before;bitmap=current;contentMix=mix;
         this.inner=inner;this.amount=amount;this.veil=veil;drawFrame();
     }
     void hold(Bitmap nativeFrame){reveal(nativeFrame,null,0,inner,0,0);}
     void reveal(Bitmap nativeBefore,Bitmap current,float mix,boolean inner,float amount,float veil){
+        requireNative(current);
         if(nativeBefore!=null&&!matches(nativeBefore))throw new IllegalArgumentException("A held frame must belong to this panel");
         bakedBefore=nativeBefore;previousBitmap=null;bitmap=current;contentMix=mix;
         this.inner=inner;this.amount=amount;this.veil=veil;drawFrame();
     }
+    private void requireNative(Bitmap frame){if(frame!=null&&!matches(frame))throw new IllegalArgumentException("Content must use this panel's native layout");}
     void opacity(float alpha) {
         if(closed||Math.abs(opacity-alpha)<.001f)return;opacity=alpha;
         try(SurfaceControl.Transaction t=new SurfaceControl.Transaction()){t.setAlpha(control,alpha).apply();}
@@ -63,6 +67,19 @@ final class NativePanel implements AutoCloseable {
         finally {if(out!=null)try{surface.unlockCanvasAndPost(out);}catch(RuntimeException e){healthy=false;android.util.Log.e("PoldyCapture","root_post_failed",e);}}
     }
     private void drawInto(Canvas out,FoldRenderer painter){
+        // An opaque, content-free preparation surface is also snapshot-able. It never
+        // stretches the opposite layout or exposes an old task while a native cache is absent.
+        if(bakedBefore==null&&previousBitmap==null&&(bitmap==null||contentMix<1)){
+            preparationPaint.setShader(new LinearGradient(0,0,width,height,
+                Color.rgb(49,57,67),Color.rgb(25,31,40),Shader.TileMode.CLAMP));
+            out.drawRect(0,0,width,height,preparationPaint);
+            if(bitmap!=null&&contentMix>0){
+                int layer=out.saveLayerAlpha(0,0,width,height,Math.round(255*contentMix));
+                painter.draw(out,width,height,null,bitmap,1,optics!=null?optics:FoldOptics.posture(inner,true),amount,veil);
+                out.restoreToCount(layer);
+            }
+            return;
+        }
         if(bakedBefore!=null&&bakedBefore.isRecycled())throw new IllegalStateException("Panel hold was released while still referenced");
         if(bakedBefore!=null&&!bakedBefore.isRecycled()){
             bakedPaint.setAlpha(255);out.drawBitmap(bakedBefore,0,0,bakedPaint);
@@ -76,7 +93,7 @@ final class NativePanel implements AutoCloseable {
     private static final java.util.concurrent.ExecutorService SNAPSHOTS=java.util.concurrent.Executors.newSingleThreadExecutor();
     /** GPU snapshot of what this physical panel showed, including its own layout and effects. */
     void snapshot(android.os.Handler main,java.util.function.Consumer<Bitmap> callback){
-        if(closed||(bitmap==null&&bakedBefore==null)||android.os.Build.VERSION.SDK_INT<34){callback.accept(null);return;}
+        if(closed||android.os.Build.VERSION.SDK_INT<34){callback.accept(null);return;}
         snapshot34(main,callback);
     }
     @android.annotation.TargetApi(34)

@@ -31,13 +31,14 @@ final class ControlBridge {
             }
             if (remote != null) return;
             args = new Shizuku.UserServiceArgs(new ComponentName(context, DisplayControl.class))
-                .daemon(false).processNameSuffix("display_control").debuggable(false).version(39);
+                .daemon(false).processNameSuffix("display_control").debuggable(false).version(44);
             status = "화면 제어 연결 중";
             Shizuku.bindUserService(args, connection);
         } catch (RuntimeException e) { status = "화면 제어 연결 실패: " + e.getClass().getSimpleName(); }
     }
     static boolean ready() { return remote != null && "READY".equals(status); }
-    interface FrameResult {void done(android.graphics.Bitmap frame,long elapsed,int baseState,String error);}
+    record FrameInfo(long elapsed,int baseState,String owner,long generation,boolean nativeReady,boolean inner) {}
+    interface FrameResult {void done(android.graphics.Bitmap frame,FrameInfo info,String error);}
     private static final ExecutorService captureWorker=Executors.newSingleThreadExecutor();
     static void capture(boolean inner,android.view.SurfaceControl[] excluded,FrameResult callback) {
         // Snapshot parcelable handles before the window can be removed on the main thread.
@@ -48,14 +49,14 @@ final class ControlBridge {
             finally {parcel.recycle();}
         }
         captureWorker.execute(()->{
-            android.graphics.Bitmap bitmap=null;long elapsed=0;int baseState=-1;String error=null;
+            android.graphics.Bitmap bitmap=null;FrameInfo info=null;String error=null;
             try(CapturedFrame result=remote.captureFrame(inner,copies)) {
                 if(result==null)error="Empty capture reply";
-                else {elapsed=result.captureMillis;baseState=result.baseState;error=result.error;bitmap=result.takeBitmap();}
+                else {info=new FrameInfo(result.captureMillis,result.baseState,result.owner,result.generation,result.nativeReady,result.inner);error=result.error;bitmap=result.takeBitmap();}
             }catch(Exception e){error=e.toString();}
             finally {for(android.view.SurfaceControl copy:copies)copy.release();}
-            android.graphics.Bitmap answer=bitmap;long duration=elapsed;int physical=baseState;String failure=error;
-            main.post(()->callback.done(answer,duration,physical,failure));
+            android.graphics.Bitmap answer=bitmap;FrameInfo metadata=info;String failure=error;
+            main.post(()->callback.done(answer,metadata,failure));
         });
     }
     interface SceneResult {void done(android.view.SurfaceControl[] panels,String error);}
@@ -78,13 +79,21 @@ final class ControlBridge {
         });
     }
     static void stopAngles(){worker.execute(()->{try{if(remote!=null)remote.stopAngles();}catch(Exception ignored){}});}
-    static void switchTo(boolean inner, Result callback) {
+    static void switchTo(boolean inner,long generation, Result callback) {
         worker.execute(() -> {
             String result;
-            try { result = remote != null ? remote.requestMode(inner) : "제어 연결이 없습니다."; }
+            try { result = remote != null ? remote.requestMode(inner,generation) : "제어 연결이 없습니다."; }
             catch (Exception e) { result = "화면 요청 실패: " + e.getClass().getSimpleName(); }
             String answer = result;
             main.post(() -> callback.done(answer));
+        });
+    }
+    static void finishMode(boolean inner,long generation,Result callback){
+        worker.execute(()->{
+            String result;
+            try{result=remote!=null?remote.finishMode(inner,generation):"제어 연결이 없습니다.";}
+            catch(Exception e){result=e.toString();}
+            String answer=result;main.post(()->callback.done(answer));
         });
     }
     static void renew() { worker.execute(() -> { try { if (remote != null) remote.renew(); } catch (Exception ignored) {} }); }

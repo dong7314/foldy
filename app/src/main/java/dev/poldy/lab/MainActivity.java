@@ -24,7 +24,7 @@ public final class MainActivity extends Activity {
     private final Runnable refresh = new Runnable() {
         @Override public void run() {
             readings.setText((ControlBridge.ready() ? "화면 제어 연결됨" : ControlBridge.status)
-                + "\n" + FoldService.status + (ProbeService.running ? "\n\n"+ProbeService.status : ""));
+                + "\n" + FoldService.status);
             handler.postDelayed(this,250);
         }
     };
@@ -49,28 +49,10 @@ public final class MainActivity extends Activity {
         button(body,"1 · 화면 제어 연결",()->ControlBridge.connect(this));
         button(body,"2 · 다른 앱 위에 표시 허용",()->startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
             Uri.parse("package:"+getPackageName()))));
-        button(body,"3 · 애니메이션 시작 · 5분 시험",this::startAnimation);
+        button(body,"3 · 애니메이션 시작",this::startAnimation);
         button(body,"애니메이션 중지",()->{stopService(new Intent(this,FoldService.class));ControlBridge.reset();});
-        label(body,"완전히 접은 상태에서 시작해 주세요.\n기기의 접힘 각도 기록으로 효과를 움직이고, 자이로로 기울기에 따른 화면 변형을 더합니다. 각도 기록 사이에는 보간이 적용되며 작은 움직임은 늦게 반영될 수 있습니다.",14,0xFFB9C4CC);
+        label(body,"완전히 접은 상태에서 시작해 주세요.\n기기의 접힘 각도에 맞춰 화면 효과를 움직이고, 각도 기록 사이를 자연스럽게 연결합니다.",14,0xFFB9C4CC);
         label(body,"화면 공유는 전체 화면을 선택해 주세요. 이미지는 저장하거나 전송하지 않으며 기기 안에서만 처리합니다. 화면 잠금 또는 공유 종료 시 동작을 중지합니다.",13,0xFF91A6B1);
-        label(body,"진단 도구",17,Color.WHITE);
-        button(body,"새 효과 · 각도별 미리보기",()->startActivity(new Intent(this,OpticsPreviewActivity.class)));
-        Button touchCheck=new Button(this);touchCheck.setText("터치 진단 · 0회");
-        final int[] taps={0};touchCheck.setOnClickListener(v->{touchCheck.setText("터치 진단 · "+(++taps[0])+"회");android.util.Log.i("PoldyTouch","test_tap:"+taps[0]);});body.addView(touchCheck);
-
-        button(body,"화면 전환 자동 진단 · 6초",()->{
-            if(!FoldService.running){Toast.makeText(this,"애니메이션 시험을 먼저 시작해 주세요.",Toast.LENGTH_SHORT).show();return;}
-            startService(new Intent(this,FoldService.class).setAction(FoldService.DIAGNOSE));
-        });
-        button(body,"고해상도 경로 진단",()->{
-            if(!ControlBridge.ready()){ControlBridge.connect(this);return;}
-            android.view.Display.Mode mode=getDisplay().getMode();
-            CaptureDiagnostics.run(this,mode.getPhysicalWidth()==2448);
-        });
-        button(body,"각도·화면 상태 측정 시작",()->{
-            requestNotification();startForegroundService(new Intent(this,ProbeService.class));
-        });
-        button(body,"측정 종료",()->stopService(new Intent(this,ProbeService.class)));
         setContentView(scroll);
     }
     private void requestNotification() {

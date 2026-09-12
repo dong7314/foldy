@@ -21,6 +21,8 @@ public final class DisplayControl extends IDisplayControl.Stub {
     private Object stateCallback;
     private StableDisplay stable;
     private HalAngleReader angles;
+    private TaskProfileReader tasks;
+    private final ProfileSwitchGate switching=new ProfileSwitchGate();
 
     @SuppressLint("WrongConstant") // Hidden service constant; this class runs in Shizuku's shell process.
     public DisplayControl(Context context) {
@@ -50,14 +52,14 @@ public final class DisplayControl extends IDisplayControl.Stub {
                 }
                 if(method.getName().equals("onDeviceStateChanged")&&args!=null&&args.length>0) {
                     int id=(int)args[0].getClass().getMethod("getIdentifier").invoke(args[0]);
+                    boolean restore;boolean target;long token;
                     synchronized(this) {
                         // The firmware cancels a concurrent override when the base becomes CLOSED.
                         // Restore cover-primary preparation only while this trial still owns a lease.
-                        if(id==closedId&&ownedState>=0&&!settling&&SystemClock.elapsedRealtime()<leaseUntil) {
-                            String result=requestMode(stable!=null&&stable.isInner());
-                            android.util.Log.i("PoldyControl","closed_prewarm_restore:"+result);
-                        }
+                        restore=id==closedId&&ownedState>=0&&!settling&&SystemClock.elapsedRealtime()<leaseUntil;
+                        target=switching.inner;token=switching.generation;
                     }
+                    if(restore)android.util.Log.i("PoldyControl","closed_prewarm_restore:"+requestMode(target,token,true));
                 }
                 return null;
             });
@@ -88,8 +90,12 @@ public final class DisplayControl extends IDisplayControl.Stub {
             return innerId >= 0 && outerId >= 0 && openedId >= 0 && closedId >= 0 ? "READY" : "지원 상태를 찾지 못했습니다.";
         } catch (Exception e) { return e.getMessage(); }
     }
-    @Override public synchronized String requestMode(boolean inner) {
+    @Override public String requestMode(boolean inner,long generation) {return requestMode(inner,generation,false);}
+    private String requestMode(boolean inner,long generation,boolean reassert) {
         try {
+          synchronized(this) {
+            if(reassert&&!switching.matches(generation,inner))return "STALE";
+            if(!reassert&&generation<=switching.generation)return "STALE";
             if (innerId < 0 || outerId < 0) return "화면 상태 검증이 필요합니다.";
             String state = command("/system/bin/cmd", "device_state", "state");
             if (state.contains("Override state:") && (ownedState < 0 || !hasOwnOverride(state)))
@@ -101,10 +107,6 @@ public final class DisplayControl extends IDisplayControl.Stub {
             }
             settling = false;
             leaseUntil = SystemClock.elapsedRealtime() + 4000;
-            if(ownedState==desired && hasOwnOverride(state)) {
-                if(stable!=null)stable.resize(inner);
-                return "OK";
-            }
             if(stable==null) {
                 String apk=command("/system/bin/pm","path","dev.poldy.lab").trim();
                 if(!apk.startsWith("package:")||apk.contains("\n"))throw new IllegalStateException("Unexpected APK path");
@@ -112,32 +114,54 @@ public final class DisplayControl extends IDisplayControl.Stub {
             }
             // CLOSED can cancel the concurrent request while the cover is already primary.
             // Reasserting that same profile must not move an idle transparent panel to a private stack.
-            boolean shielding=scene!=null&&PhysicalPanels.primaryIsInner()!=inner;
+            boolean shielding=scene!=null&&(switching.pending||PhysicalPanels.primaryIsInner()!=inner);
+            if(reassert&&shielding&&!switching.pending)
+                throw new IllegalStateException("Unexpected profile cancellation outside a covered transfer");
+            if(!reassert)switching.begin(generation,inner,SystemClock.elapsedRealtime(),shielding);
             if(shielding)scene.shield();
-            long switchStarted=SystemClock.elapsedRealtime();
             if(panelPower==null)panelPower=new PanelPower();
             panelPower.hold();
             Class<?> requestClass = Class.forName("android.hardware.devicestate.DeviceStateRequest");
             Object builder = requestClass.getMethod("newBuilder",int.class).invoke(null,desired);
             Object request = builder.getClass().getMethod("build").invoke(builder);
             // This firmware can retain a dead client request; an independent guard is required.
-            stateManager.getClass().getMethod("requestState",requestClass,Executor.class,
-                Class.forName("android.hardware.devicestate.DeviceStateRequest$Callback"))
-                .invoke(stateManager,request,null,null);
+            if(ownedState!=desired||!hasOwnOverride(state))
+                stateManager.getClass().getMethod("requestState",requestClass,Executor.class,
+                    Class.forName("android.hardware.devicestate.DeviceStateRequest$Callback"))
+                    .invoke(stateManager,request,null,null);
             ownedState = desired;
-            stable.resize(inner);
-            if(shielding) {
-                // DMS can perform a late traversal after its new DisplayInfo becomes visible.
-                while(SystemClock.elapsedRealtime()-switchStarted<650){stable.renew();Thread.sleep(10);}
-                stable.resize(inner);scene.finishSwitch(inner);
+          }
+            // Never hold the capture/lease/reset lock while waiting for a display traversal.
+            long until=SystemClock.elapsedRealtime()+1800;
+            while(SystemClock.elapsedRealtime()<until) {
+                synchronized(this) {
+                    if(!switching.matches(generation,inner)||stable==null)return "STALE";
+                    if(!stable.unlocked())throw new IllegalStateException("Locked during profile change");
+                    boolean ready=stable.profileReady(inner);switching.observe(ready,SystemClock.elapsedRealtime());
+                    if(ready){android.util.Log.i("PoldyControl","native_profile_ready:generation="+generation+", inner="+inner);return "OK";}
+                    stable.renew();
+                }
+                Thread.sleep(12);
             }
-            return "OK";
+            throw new IllegalStateException("Native display profile did not settle");
         } catch (Exception e) {
-            reset();
+            synchronized(this){if(switching.matches(generation,inner))reset();}
             Throwable reason=e;
             while (reason.getCause()!=null) reason=reason.getCause();
             return reason.getClass().getSimpleName()+": "+reason.getMessage();
         }
+    }
+    @Override public synchronized String finishMode(boolean inner,long generation) {
+        if(!switching.matches(generation,inner)||stable==null||ownedState<0)return "STALE";
+        try {
+            if(SystemClock.elapsedRealtime()>=leaseUntil||!stable.unlocked())throw new IllegalStateException("Display lease ended or locked");
+            boolean ready=stable.profileReady(inner);switching.observe(ready,SystemClock.elapsedRealtime());
+            if(!ready||!switching.canFinish(generation,SystemClock.elapsedRealtime()))return "WAIT";
+            if(scene!=null&&switching.pending)scene.finishSwitch(inner);
+            switching.finished();
+            android.util.Log.i("PoldyControl","native_output_released:generation="+generation+", inner="+inner);
+            return "OK";
+        }catch(Exception e){reset();return e.toString();}
     }
     private boolean hasOwnOverride(String state) {
         Matcher m = Pattern.compile("Override state: DeviceState\\{identifier=(\\d+)").matcher(state);
@@ -157,8 +181,21 @@ public final class DisplayControl extends IDisplayControl.Stub {
                 if(frameCapture==null)frameCapture=new NativeFrameCapture();
             }
             synchronized(this) {
-                if(stable!=null)return stable.capture(frameCapture);
-                return frameCapture.capture(inner,excluded);
+                if(stable==null)return frameCapture.capture(inner,excluded); // Standalone capture diagnostics.
+                if(!stable.unlocked())throw new IllegalStateException("Display locked");
+                if(tasks==null)tasks=new TaskProfileReader();
+                boolean profileReady=stable.profileReady(switching.inner);
+                switching.observe(profileReady,SystemClock.elapsedRealtime());
+                TaskProfileReader.Profile before=tasks.read();
+                CapturedFrame result=stable.capture(frameCapture);
+                try {
+                    TaskProfileReader.Profile after=tasks.read();
+                    result.generation=switching.generation;result.inner=stable.isInner();
+                    boolean same=before.owner()!=null&&before.equals(after);
+                    result.owner=same?after.owner():null;
+                    result.nativeReady=profileReady&&same&&after.ready()&&after.inner()==result.inner;
+                    return result;
+                }catch(Exception e){result.close();throw e;}
             }
         } catch(Exception e) {
             CapturedFrame result=new CapturedFrame();result.error=e.toString();return result;
@@ -185,15 +222,17 @@ public final class DisplayControl extends IDisplayControl.Stub {
     }
     @Override public synchronized void stopAngles(){if(angles!=null){angles.close();angles=null;}}
     @Override public synchronized void settle(boolean fullyOpen) {
-        if (ownedState >= 0) {
+        if(ownedState>=0) {
+            // Profile changes require FoldService's two-panel cover and generation.
+            // A legacy settle call must not start an unfenced private shield.
+            if(switching.inner!=fullyOpen||switching.pending){reset();return;}
             // The actual endpoint wins even after an undetectable reversal inside the 90 posture.
             settlingBase=fullyOpen?openedId:closedId;
-            int desired=fullyOpen?innerId:outerId;
-            if (ownedState!=desired) requestMode(fullyOpen);
             settling=true; leaseUntil=SystemClock.elapsedRealtime()+4000;
         }
     }
     @Override public synchronized void reset() {
+        switching.reset();
         stopAngles();
         StableDisplay retiring=stable;stable=null;
         if(retiring!=null)retiring.close();

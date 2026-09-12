@@ -2,6 +2,12 @@ package dev.poldy.lab;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public class TransferGateTest {
+    @Test public void changedOwnerOrInvalidProfileRequiresTwoFreshFramesAgain(){
+        TransferGate g=new TransferGate();long token=g.begin(true);g.covered(token);g.frame(token,true);
+        g.invalidateFrames();assertFalse(g.frame(token,true));assertTrue(g.frame(token,true));
+        g.invalidateFrames();assertEquals(TransferGate.Phase.WAITING_FRAME,g.phase);
+        assertFalse(g.frame(token,true));assertTrue(g.frame(token,true));
+    }
     @Test public void framesCannotRevealBeforeTheCurtainIsReady(){
         TransferGate g=new TransferGate();long t=g.begin(true);
         assertFalse(g.frame(t,true));assertEquals(TransferGate.Phase.COVERING,g.phase);

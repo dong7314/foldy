@@ -31,11 +31,12 @@ public final class RendererBenchmark extends Instrumentation {
                             target.draw(angle,.6f);
                             String file=(inner?"inner":"outer")+"-edge-"+angle+".png";target.save(file);
                             FoldOptics.Pose pose=FoldOptics.at(inner,angle);
-                            FoldPlane.Shape shape=FoldPlane.at(pose,.2f,.8f,.6f,0,0,0);
-                            float[] quad=new float[8];FoldPlane.quad(inner,shape,target.w,target.h,1,quad);
                             cases.put(new JSONObject().put("file",file).put("inner",inner).put("angle",angle)
-                                .put("width",target.w).put("height",target.h).put("quad",new JSONArray(quad))
-                                .put("softness",FoldRenderer.boundarySoftness(target.w,target.h,pose,1)));
+                                .put("width",target.w).put("height",target.h)
+                                .put("wipeAmount",pose.wipeAmount())
+                                .put("blurLeft",FoldOptics.blurArea(pose,0))
+                                .put("blurCenter",FoldOptics.blurArea(pose,.5f))
+                                .put("blurRight",FoldOptics.blurArea(pose,1)));
                         }
                     }
                     try(Target target=new Target(inner,true)){
@@ -43,7 +44,7 @@ public final class RendererBenchmark extends Instrumentation {
                     }
                 }
                 try(FileWriter file=new FileWriter(new File(directory,"edge-cases.json"))){file.write(cases.toString(2));}
-                result.putString("stream","Soft boundary GPU samples completed");finish(Activity.RESULT_OK,result);return;
+                result.putString("stream","Official Wipe boundary GPU samples completed");finish(Activity.RESULT_OK,result);return;
             }
             if(entryOnly){
                 for(boolean inner:new boolean[]{false,true})try(Target target=new Target(inner,true)){

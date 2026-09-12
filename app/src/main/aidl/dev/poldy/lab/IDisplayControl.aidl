@@ -6,7 +6,7 @@ import dev.poldy.lab.IHingeAngleListener;
 
 interface IDisplayControl {
     String capabilities() = 0;
-    String requestMode(boolean inner) = 1;
+    String requestMode(boolean inner, long generation) = 1;
     void renew() = 2;
     void reset() = 3;
     void settle(boolean fullyOpen) = 4;
@@ -15,5 +15,6 @@ interface IDisplayControl {
     void routeScene(boolean inner) = 7;
     String startAngles(IHingeAngleListener listener) = 8;
     void stopAngles() = 9;
+    String finishMode(boolean inner, long generation) = 10;
     void destroy() = 16777114;
 }

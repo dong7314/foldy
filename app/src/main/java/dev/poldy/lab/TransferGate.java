@@ -7,6 +7,7 @@ final class TransferGate {
     boolean inner;
     Phase phase=Phase.READY;
     private int freshFrames;
+    void invalidateFrames(){freshFrames=0;if(phase==Phase.READY)phase=Phase.WAITING_FRAME;}
     long begin(boolean inner){this.inner=inner;freshFrames=0;phase=Phase.COVERING;return ++generation;}
     boolean covered(long token){
         if(token!=generation||phase!=Phase.COVERING)return false;

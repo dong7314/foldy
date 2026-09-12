@@ -43,18 +43,18 @@ final class StableDisplay implements AutoCloseable {
     void resize(boolean opened)throws Exception {
         if(closed)throw new IllegalStateException("Display session closed");
         long until=SystemClock.elapsedRealtime()+1800;
-        Point size=new Point();
         while(SystemClock.elapsedRealtime()<until) {
-            api.getMethod("getBaseDisplaySize",int.class,Point.class).invoke(wm,0,size);
-            if(PhysicalPanels.primaryIsInner()==opened&&size.x==(opened?2448:1248)&&size.y==(opened?1848:1972)) {
-                inner=opened;
-                android.util.Log.i("PoldyControl","native_profile:"+(inner?"inner":"outer")+", size="+size);
-                return;
-            }
+            if(profileReady(opened))return;
             if(!unlocked())throw new IllegalStateException("Locked during profile change");
             renew();Thread.sleep(12);
         }
-        throw new IllegalStateException("Native display profile did not settle: "+size);
+        throw new IllegalStateException("Native display profile did not settle");
+    }
+    boolean profileReady(boolean opened)throws Exception {
+        if(closed)throw new IllegalStateException("Display session closed");
+        Point size=new Point();api.getMethod("getBaseDisplaySize",int.class,Point.class).invoke(wm,0,size);
+        boolean ready=PhysicalPanels.primaryIsInner()==opened&&size.x==(opened?2448:1248)&&size.y==(opened?1848:1972);
+        if(ready)inner=opened;return ready;
     }
     boolean isInner(){return inner;}
     boolean unlocked()throws Exception{return !(boolean)api.getMethod("isKeyguardLocked").invoke(wm);}
