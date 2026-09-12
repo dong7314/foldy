@@ -18,11 +18,16 @@ def adb_path():
     candidate = os.environ.get("POLDY_ADB") or shutil.which("adb")
     if candidate:
         return candidate
+    sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    if sdk:
+        return str(Path(sdk) / "platform-tools" / ("adb.exe" if os.name == "nt" else "adb"))
+    if os.name == "nt":
+        return str(Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "Android/Sdk/platform-tools/adb.exe")
     return str(Path.home() / "Library/Android/sdk/platform-tools/adb")
 
 
 def run(args, timeout=12):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    result = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", timeout=timeout)
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout).strip())
     return result.stdout
