@@ -6,8 +6,8 @@ android {
         applicationId = "dev.poldy.lab"
         minSdk = 33
         targetSdk = 36
-        versionCode = 44
-        versionName = "0.16.1"
+        versionCode = 67
+        versionName = "0.18.4"
         testInstrumentationRunner = "dev.poldy.lab.RendererBenchmark"
     }
     compileOptions {
