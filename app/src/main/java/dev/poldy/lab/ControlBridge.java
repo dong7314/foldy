@@ -33,7 +33,7 @@ final class ControlBridge {
             }
             if (remote != null) return;
             args = new Shizuku.UserServiceArgs(new ComponentName(context, DisplayControl.class))
-                .daemon(false).processNameSuffix("display_control").debuggable(false).version(67);
+                .daemon(false).processNameSuffix("display_control").debuggable(false).version(68);
             status = "화면 제어 연결 중";
             Shizuku.bindUserService(args, connection);
         } catch (RuntimeException e) { status = "화면 제어 연결 실패: " + e.getClass().getSimpleName(); }
