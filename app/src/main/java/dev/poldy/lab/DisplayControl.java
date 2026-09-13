@@ -13,7 +13,6 @@ public final class DisplayControl extends IDisplayControl.Stub {
     private int innerId = -1, outerId = -1, openedId = -1, closedId = -1, ownedState = -1;
     private long leaseUntil;
     private boolean settling;
-    private int settlingBase = -1;
     private final Object stateManager;
     private NativeFrameCapture frameCapture;
     private PanelPower panelPower;
@@ -23,6 +22,7 @@ public final class DisplayControl extends IDisplayControl.Stub {
     private HalAngleReader angles;
     private TaskProfileReader tasks;
     private final ProfileSwitchGate switching=new ProfileSwitchGate();
+    private final PanelRotation rotations=new PanelRotation();
 
     @SuppressLint("WrongConstant") // Hidden service constant; this class runs in Shizuku's shell process.
     public DisplayControl(Context context) {
@@ -30,13 +30,6 @@ public final class DisplayControl extends IDisplayControl.Stub {
         watchClosedCancellation();
         watchdog.scheduleAtFixedRate(() -> {
             synchronized (this) {
-                if (ownedState >= 0 && settling) {
-                    try {
-                        String state=command("/system/bin/cmd","device_state","state");
-                        Matcher base=Pattern.compile("Base state: DeviceState\\{identifier=(\\d+)").matcher(state);
-                        if (base.find() && Integer.parseInt(base.group(1))==settlingBase) reset();
-                    } catch (Exception ignored) {}
-                }
                 if (ownedState >= 0 && SystemClock.elapsedRealtime() > leaseUntil) reset();
             }
         }, 500, 500, TimeUnit.MILLISECONDS);
@@ -73,6 +66,37 @@ public final class DisplayControl extends IDisplayControl.Stub {
         if (process.exitValue() != 0) throw new Exception(output.trim());
         return output;
     }
+    private String rotationMode(int displayId) throws Exception {
+        return PanelRotation.normalize(command("/system/bin/wm", "user-rotation", "-d", Integer.toString(displayId)));
+    }
+    private void observeRotationPreferences() throws Exception {
+        boolean primaryInner = PhysicalPanels.primaryIsInner();
+        String active = rotationMode(0);
+        if (rotations.ready()) rotations.observeActive(primaryInner, active);
+        else rotations.capture(primaryInner, active, rotationMode(1));
+        if(stable!=null)stable.updateRecoveryRotations(rotations.panelMode(true),rotations.panelMode(false));
+    }
+    private void writeRotationMode(int displayId, String mode) throws Exception {
+        String[] parts = PanelRotation.normalize(mode).split(" ");
+        if (parts[0].equals("free"))
+            command("/system/bin/wm", "user-rotation", "-d", Integer.toString(displayId), "free");
+        else
+            command("/system/bin/wm", "user-rotation", "-d", Integer.toString(displayId), "lock", parts[1]);
+    }
+    private boolean restoreRotationPreferences(boolean primaryInner) {
+        if (!rotations.ready()) return true;
+        try {
+            String display0=rotations.mode(primaryInner,0),display1=rotations.mode(primaryInner,1);
+            writeRotationMode(0,display0);writeRotationMode(1,display1);
+            if(!rotationMode(0).equals(display0)||!rotationMode(1).equals(display1))
+                throw new IllegalStateException("Rotation policy verification failed");
+            android.util.Log.i("PoldyControl", "panel_rotation_restored:inner=" + primaryInner);
+            return true;
+        } catch (Exception e) {
+            android.util.Log.e("PoldyControl", "panel_rotation_restore_failed", e);
+            return false;
+        }
+    }
     @Override public synchronized String capabilities() {
         try {
             // Only enable automatic switching on the model physically verified in this project.
@@ -101,16 +125,17 @@ public final class DisplayControl extends IDisplayControl.Stub {
             if (state.contains("Override state:") && (ownedState < 0 || !hasOwnOverride(state)))
                 return "다른 화면 상태 요청이 있어 중단했습니다.";
             int desired = inner ? innerId : outerId;
-            if(ownedState<0) {
+            if(ownedState<0&&stable==null) {
                 if(!state.contains("name='CLOSED'"))return "이번 시험은 완전히 접은 상태에서 시작해 주세요.";
                 if(command("/system/bin/wm","size","-d","0").contains("Override size:"))return "기존 화면 크기 설정이 있어 시험을 중지했습니다.";
             }
+            observeRotationPreferences();
             settling = false;
             leaseUntil = SystemClock.elapsedRealtime() + 4000;
             if(stable==null) {
                 String apk=command("/system/bin/pm","path","dev.poldy.lab").trim();
                 if(!apk.startsWith("package:")||apk.contains("\n"))throw new IllegalStateException("Unexpected APK path");
-                stable=new StableDisplay(apk.substring(8));
+                stable=new StableDisplay(apk.substring(8),rotations.panelMode(true),rotations.panelMode(false));
             }
             // CLOSED can cancel the concurrent request while the cover is already primary.
             // Reasserting that same profile must not move an idle transparent panel to a private stack.
@@ -118,9 +143,12 @@ public final class DisplayControl extends IDisplayControl.Stub {
             if(reassert&&shielding&&!switching.pending)
                 throw new IllegalStateException("Unexpected profile cancellation outside a covered transfer");
             if(!reassert)switching.begin(generation,inner,SystemClock.elapsedRealtime(),shielding);
-            if(shielding)scene.shield();
             if(panelPower==null)panelPower=new PanelPower();
+            // The endpoint lease keeps logical display 1 OFF. Turn both logical
+            // outputs on before routing the already-presented shield layers, or a
+            // fast reversal can expose an unpowered/wrong profile for one frame.
             panelPower.hold();
+            if(shielding)scene.shield();
             Class<?> requestClass = Class.forName("android.hardware.devicestate.DeviceStateRequest");
             Object builder = requestClass.getMethod("newBuilder",int.class).invoke(null,desired);
             Object request = builder.getClass().getMethod("build").invoke(builder);
@@ -138,7 +166,10 @@ public final class DisplayControl extends IDisplayControl.Stub {
                     if(!switching.matches(generation,inner)||stable==null)return "STALE";
                     if(!stable.unlocked())throw new IllegalStateException("Locked during profile change");
                     boolean ready=stable.profileReady(inner);switching.observe(ready,SystemClock.elapsedRealtime());
-                    if(ready){android.util.Log.i("PoldyControl","native_profile_ready:generation="+generation+", inner="+inner);return "OK";}
+                    if(ready){
+                        if(!restoreRotationPreferences(inner))throw new IllegalStateException("Panel rotation restore failed");
+                        android.util.Log.i("PoldyControl","native_profile_ready:generation="+generation+", inner="+inner);return "OK";
+                    }
                     stable.renew();
                 }
                 Thread.sleep(12);
@@ -168,9 +199,12 @@ public final class DisplayControl extends IDisplayControl.Stub {
         return m.find() && Integer.parseInt(m.group(1)) == ownedState;
     }
     @Override public synchronized void renew() {
-        if(ownedState<0)return;
+        if(stable==null)return;
         leaseUntil=SystemClock.elapsedRealtime()+4000;
-        try {if(panelPower!=null)panelPower.hold();if(stable!=null)stable.renew();}
+        try {
+            if(panelPower!=null){if(ownedState>=0)panelPower.hold();else panelPower.keepEndpoint();}
+            stable.renew();
+        }
         catch(Exception e){reset();android.util.Log.e("PoldyControl","panel_power_lease_failed",e);}
     }
     @Override public CapturedFrame captureFrame(boolean inner,android.view.SurfaceControl[] excluded) {
@@ -187,7 +221,10 @@ public final class DisplayControl extends IDisplayControl.Stub {
                 boolean profileReady=stable.profileReady(switching.inner);
                 switching.observe(profileReady,SystemClock.elapsedRealtime());
                 TaskProfileReader.Profile before=tasks.read();
-                CapturedFrame result=stable.capture(frameCapture);
+                // Capture the composed physical panel so a landscape task is returned
+                // in the panel's native pixel orientation (the animation buffers stay
+                // 2448x1848 and 1248x1972 in every app orientation).
+                CapturedFrame result=frameCapture.capture(stable.isInner(),excluded);
                 try {
                     TaskProfileReader.Profile after=tasks.read();
                     result.generation=switching.generation;result.inner=stable.isInner();
@@ -226,26 +263,66 @@ public final class DisplayControl extends IDisplayControl.Stub {
             // Profile changes require FoldService's two-panel cover and generation.
             // A legacy settle call must not start an unfenced private shield.
             if(switching.inner!=fullyOpen||switching.pending){reset();return;}
-            // The actual endpoint wins even after an undetectable reversal inside the 90 posture.
-            settlingBase=fullyOpen?openedId:closedId;
-            settling=true; leaseUntil=SystemClock.elapsedRealtime()+4000;
+            try {
+                // The transition has been revealed on logical display 0. Let the
+                // firmware return to its physical endpoint policy so the other
+                // panel powers off, while keeping the prepared scene for the next fold.
+                settling=true;
+                if(panelPower!=null)panelPower.settle();
+                stateManager.getClass().getMethod("cancelStateRequest").invoke(stateManager);
+                ownedState=-1;
+                long until=SystemClock.elapsedRealtime()+700;
+                while(SystemClock.elapsedRealtime()<until) {
+                    if(!command("/system/bin/cmd","device_state","state").contains("Override state:"))break;
+                    Thread.sleep(12);
+                }
+                if(!restoreRotationPreferences(fullyOpen))throw new IllegalStateException("Panel rotation restore failed");
+                if(stable!=null)stable.renew();
+                android.util.Log.i("PoldyControl","endpoint_power_released:inner="+fullyOpen);
+            } catch(Exception e) {
+                android.util.Log.e("PoldyControl","endpoint_power_release_failed",e);
+                reset();
+            }
         }
     }
-    @Override public synchronized void reset() {
+    @Override public synchronized void reset() {resetInternal(true);}
+    @Override public synchronized void sleep() {resetInternal(false);}
+    private void resetInternal(boolean keepActivePanelAwake) {
         switching.reset();
         stopAngles();
-        StableDisplay retiring=stable;stable=null;
+        StableDisplay retiring=stable;
+        boolean stateRestored=true;
+        if(ownedState>=0) {
+            try {
+                // Keep the native scene covering both physical panels until the
+                // firmware has actually dropped our concurrent-display override.
+                stateManager.getClass().getMethod("cancelStateRequest").invoke(stateManager);
+                ownedState=-1;settling=false;
+                long until=SystemClock.elapsedRealtime()+700;
+                while(SystemClock.elapsedRealtime()<until) {
+                    if(!command("/system/bin/cmd","device_state","state").contains("Override state:"))break;
+                    Thread.sleep(12);
+                }
+                if(command("/system/bin/cmd","device_state","state").contains("Override state:"))
+                    throw new IllegalStateException("Device-state override remained after cancellation");
+            } catch(Exception e) {
+                stateRestored=false;
+                android.util.Log.e("PoldyControl","state_restore_failed",e);
+            }
+        }
+        boolean rotationRestored=false;
+        try { rotationRestored=restoreRotationPreferences(PhysicalPanels.primaryIsInner()); }
+        catch(Exception e) { android.util.Log.e("PoldyControl", "panel_rotation_endpoint_unknown", e); }
+        stable=null;
         if(retiring!=null)retiring.close();
-        if(scene!=null){scene.close();scene=null;}
-        if(panelPower!=null)panelPower.release();
-        if (ownedState < 0) {if(retiring!=null)retiring.disarm();return;}
-        try {
-            stateManager.getClass().getMethod("cancelStateRequest").invoke(stateManager);
-            ownedState = -1;
-            settling = false;
-            settlingBase = -1;
-            if(retiring!=null)retiring.disarm();
-        } catch (Exception ignored) { /* Watchdog retries; do not forget ownership on failure. */ }
+        boolean routeRestored=true;
+        if(scene!=null){routeRestored=scene.closeRestoring();scene=null;}
+        if(panelPower!=null){if(keepActivePanelAwake)panelPower.releaseGracefully();else panelPower.release();}
+        if(retiring!=null){
+            if(stateRestored&&rotationRestored&&routeRestored)retiring.disarm();
+            else retiring.triggerRecovery();
+        }
+        if(keepActivePanelAwake)rotations.clear();
     }
     @Override public void destroy() {
         reset(); watchdog.shutdownNow(); System.exit(0);

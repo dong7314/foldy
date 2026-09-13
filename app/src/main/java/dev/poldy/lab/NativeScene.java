@@ -16,9 +16,11 @@ final class NativeScene implements AutoCloseable {
     private final ScheduledFuture<?>[] outputPins=new ScheduledFuture<?>[2];
     private final AtomicBoolean outputFailureLogged=new AtomicBoolean();
     private ScheduledFuture<?> routePin;
-    private float pinnedBrightness;
     private volatile boolean closed,shielded;
+    private boolean restoreFailed;
     private boolean innerPrimary;
+    private float pinnedNits;
+    private PhysicalPanels.ProjectionSpec innerShieldProjection,outerShieldProjection;
     NativeScene(boolean inner)throws Exception {
         try {
             panels[0]=new SurfaceControl.Builder().setName("Poldy persistent inner").setBufferSize(2448,1848).build();
@@ -37,12 +39,19 @@ final class NativeScene implements AutoCloseable {
         if(closed)throw new IllegalStateException("Scene closed");
         if(shielded)return;
         // FoldService has already fenced the opaque buffers on both panels.
-        // Capture the visible level before Samsung's logical-display swap briefly drives
-        // both physical brightness values to zero.
-        pinnedBrightness=physical.visibleBrightness();
+        // Keep the physical outputs powered while Samsung swaps the logical displays.
+        // The two-argument brightness overload is unsafe on this firmware: it maps an
+        // ordinary logical level to 500 nits. Preserve only the current system nits
+        // through the five-argument API while leaving both backlight arguments at -1.
+        // Freeze the current logical orientation before the display IDs swap. The
+        // private shield stacks then keep exactly the same portrait/landscape space.
+        innerShieldProjection=physical.logicalProjection(innerPrimary?0:1);
+        outerShieldProjection=physical.logicalProjection(innerPrimary?1:0);
+        pinnedNits=physical.visibleNits();
+        android.util.Log.i("PoldyControl","physical_luminance_metadata_hold:nits="+pinnedNits);
         shielded=true;pinOnce();
-        Future<?> innerOn=worker.submit(()->{physical.keepVisible(0,pinnedBrightness);return null;});
-        Future<?> outerOn=worker.submit(()->{physical.keepVisible(1,pinnedBrightness);return null;});
+        Future<?> innerOn=worker.submit(()->{outputOnce(0);return null;});
+        Future<?> outerOn=worker.submit(()->{outputOnce(1);return null;});
         awaitOutput(innerOn);awaitOutput(outerOn);
         routePin=worker.scheduleAtFixedRate(()->{
             synchronized(this){if(!shielded||closed)return;try{pinOnce();}catch(Exception e){android.util.Log.e("PoldyControl","shield_failed",e);}}
@@ -63,13 +72,13 @@ final class NativeScene implements AutoCloseable {
         }
     }
     private void outputOnce(int panel) {
-        try{physical.keepVisible(panel,pinnedBrightness);}
+        try{physical.keepLuminanceMetadata(panel,pinnedNits);}
         catch(Exception e){if(outputFailureLogged.compareAndSet(false,true))android.util.Log.e("PoldyControl","physical_output_pin_failed",e);}
     }
     private void pinOnce()throws Exception {
         try(SurfaceControl.Transaction t=new SurfaceControl.Transaction()) {
             layers(t,INNER_SHIELD,OUTER_SHIELD);
-            physical.route(t,INNER_SHIELD,OUTER_SHIELD);t.apply();
+            physical.routeNative(t,INNER_SHIELD,OUTER_SHIELD,innerShieldProjection,outerShieldProjection);t.apply();
         }
     }
     synchronized void finishSwitch(boolean inner)throws Exception {
@@ -77,9 +86,9 @@ final class NativeScene implements AutoCloseable {
         cancelPins();
         // Both layer ownership and physical projection change atomically.
         try(SurfaceControl.Transaction t=new SurfaceControl.Transaction()) {
-            layers(t,inner?0:1,inner?1:0);physical.route(t,inner?0:1,inner?1:0);t.apply();
+            layers(t,inner?0:1,inner?1:0);physical.routeLogical(t,inner?0:1,inner?1:0);t.apply();
         }
-        innerPrimary=inner;shielded=false;
+        innerPrimary=inner;shielded=false;pinnedNits=0;innerShieldProjection=null;outerShieldProjection=null;
     }
     private void cancelPins(){
         if(routePin!=null){routePin.cancel(false);routePin=null;}
@@ -101,7 +110,8 @@ final class NativeScene implements AutoCloseable {
     @Override public void close() {
         synchronized(this){
             if(closed)return;
-            try{if(shielded)finishSwitch(PhysicalPanels.primaryIsInner());}catch(Exception e){android.util.Log.e("PoldyControl","shield_restore_failed",e);}
+            try{if(shielded)finishSwitch(PhysicalPanels.primaryIsInner());}
+            catch(Exception e){restoreFailed=true;android.util.Log.e("PoldyControl","shield_restore_failed",e);}
             closed=true;cancelPins();worker.shutdownNow();
         }
         try{if(!worker.awaitTermination(500,TimeUnit.MILLISECONDS))android.util.Log.w("PoldyControl","physical_output_pin_stop_timeout");}
@@ -112,4 +122,5 @@ final class NativeScene implements AutoCloseable {
             }finally{for(int i=0;i<2;i++)if(panels[i]!=null){panels[i].release();panels[i]=null;}}
         }
     }
+    boolean closeRestoring(){close();return !restoreFailed;}
 }

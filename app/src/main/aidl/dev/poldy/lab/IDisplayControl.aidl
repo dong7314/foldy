@@ -16,5 +16,6 @@ interface IDisplayControl {
     String startAngles(IHingeAngleListener listener) = 8;
     void stopAngles() = 9;
     String finishMode(boolean inner, long generation) = 10;
+    void sleep() = 11;
     void destroy() = 16777114;
 }

@@ -16,10 +16,11 @@ final class StableDisplay implements AutoCloseable {
     private boolean inner;
     private final java.lang.Process guard;
     private final PrintWriter heartbeat;
-    StableDisplay(String apkPath)throws Exception {
+    StableDisplay(String apkPath,String innerRotation,String outerRotation)throws Exception {
         IBinder binder=(IBinder)Class.forName("android.os.ServiceManager").getMethod("getService",String.class).invoke(null,"window");
         wm=Class.forName("android.view.IWindowManager$Stub").getMethod("asInterface",IBinder.class).invoke(null,binder);
-        ProcessBuilder launch=new ProcessBuilder("/system/bin/app_process","/system/bin",RecoveryGuard.class.getName(),Integer.toString(android.os.Process.myPid()));
+        ProcessBuilder launch=new ProcessBuilder("/system/bin/app_process","/system/bin",RecoveryGuard.class.getName(),
+            Integer.toString(android.os.Process.myPid()),encodeRotation(innerRotation),encodeRotation(outerRotation));
         launch.environment().put("CLASSPATH",apkPath);launch.redirectError(java.lang.ProcessBuilder.Redirect.to(new File("/dev/null")));
         guard=launch.start();heartbeat=new PrintWriter(guard.getOutputStream(),true);
         ExecutorService reader=Executors.newSingleThreadExecutor();
@@ -33,6 +34,9 @@ final class StableDisplay implements AutoCloseable {
                 t.setVisibility(sourceParent,true).setAlpha(sourceParent,1).reparent(source,sourceParent).setVisibility(source,true).setAlpha(source,1).apply();
             }
         }catch(Exception e){close();throw e;}finally{reader.shutdownNow();}
+    }
+    private static String encodeRotation(String mode) {
+        return PanelRotation.normalize(mode).replace(' ',':');
     }
     private SurfaceControl mirror()throws Exception {
         SurfaceControl result=SurfaceControl.class.getConstructor().newInstance();
@@ -59,6 +63,10 @@ final class StableDisplay implements AutoCloseable {
     boolean isInner(){return inner;}
     boolean unlocked()throws Exception{return !(boolean)api.getMethod("isKeyguardLocked").invoke(wm);}
     void renew()throws IOException {if(!guard.isAlive())throw new IOException("Recovery guard stopped");heartbeat.println("BEAT");}
+    void updateRecoveryRotations(String innerRotation,String outerRotation)throws IOException {
+        if(!guard.isAlive())throw new IOException("Recovery guard stopped");
+        heartbeat.println("ROTATION "+encodeRotation(innerRotation)+" "+encodeRotation(outerRotation));
+    }
     CapturedFrame capture(NativeFrameCapture capture){return capture.captureLogical(source,inner?2448:1248,inner?1848:1972);}
     @Override public void close(){
         if(closed)return;closed=true;
@@ -66,4 +74,5 @@ final class StableDisplay implements AutoCloseable {
         // The guard stays armed until DisplayControl has canceled its own device-state request.
     }
     void disarm(){heartbeat.println("DISARM");heartbeat.close();}
+    void triggerRecovery(){heartbeat.close();}
 }

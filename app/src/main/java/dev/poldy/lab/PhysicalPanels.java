@@ -9,36 +9,91 @@ import java.lang.reflect.Method;
 final class PhysicalPanels {
     static final long INNER=4630947004648141459L, OUTER=4630947123231501204L;
     private static final int POWER_MODE_NORMAL=2;
+    private static final int BRIGHTNESS_UNIT_NITS=2;
     private final IBinder[] tokens=new IBinder[2];
     private final Method stack=SurfaceControl.Transaction.class.getMethod("setDisplayLayerStack",IBinder.class,int.class);
     private final Method projection=SurfaceControl.Transaction.class.getMethod("setDisplayProjection",IBinder.class,int.class,Rect.class,Rect.class);
     private final Method power=SurfaceControl.class.getMethod("setDisplayPowerMode",IBinder.class,int.class);
-    private final Method brightness=SurfaceControl.class.getMethod("setDisplayBrightness",IBinder.class,float.class);
+    private final Method luminance=SurfaceControl.class.getMethod("setDisplayBrightness",
+        IBinder.class,float.class,float.class,float.class,float.class);
     private final Object displays;
-    private final Method getBrightness;
+    private final Method getDisplayInfo;
+    private final Method getBrightnessByUnit;
     private final Rect[] bounds={new Rect(0,0,2448,1848),new Rect(0,0,1248,1972)};
+    static final class ProjectionSpec {
+        final int rotation,width,height;
+        ProjectionSpec(int rotation,int width,int height) {
+            this.rotation=rotation;this.width=width;this.height=height;
+        }
+    }
     PhysicalPanels()throws Exception {
         tokens[0]=(IBinder)SurfaceControl.class.getMethod("getPhysicalDisplayToken",long.class).invoke(null,INNER);
         tokens[1]=(IBinder)SurfaceControl.class.getMethod("getPhysicalDisplayToken",long.class).invoke(null,OUTER);
         IBinder displayBinder=(IBinder)Class.forName("android.os.ServiceManager").getMethod("getService",String.class).invoke(null,"display");
         Class<?> displayApi=Class.forName("android.hardware.display.IDisplayManager");
         displays=Class.forName("android.hardware.display.IDisplayManager$Stub").getMethod("asInterface",IBinder.class).invoke(null,displayBinder);
-        getBrightness=displayApi.getMethod("getBrightness",int.class);
+        getDisplayInfo=displayApi.getMethod("getDisplayInfo",int.class);
+        getBrightnessByUnit=displayApi.getMethod("getBrightnessByUnit",int.class,int.class);
     }
-    void route(SurfaceControl.Transaction t,int innerStack,int outerStack)throws Exception {
+    ProjectionSpec logicalProjection(int displayId)throws Exception {
+        Object info=getDisplayInfo.invoke(displays,displayId);
+        if(info==null)throw new IllegalStateException("No logical display "+displayId);
+        Class<?> type=info.getClass();
+        int rotation=type.getField("rotation").getInt(info);
+        int width=type.getField("logicalWidth").getInt(info);
+        int height=type.getField("logicalHeight").getInt(info);
+        if(width<=0||height<=0)throw new IllegalStateException("Invalid logical bounds for display "+displayId);
+        return new ProjectionSpec(rotation,width,height);
+    }
+    void routeNative(SurfaceControl.Transaction t,int innerStack,int outerStack,
+                     ProjectionSpec innerProjection,ProjectionSpec outerProjection)throws Exception {
         stack.invoke(t,tokens[0],innerStack);stack.invoke(t,tokens[1],outerStack);
-        for(int i=0;i<2;i++)projection.invoke(t,tokens[i],0,bounds[i],bounds[i]);
+        ProjectionSpec[] specs={innerProjection,outerProjection};
+        for(int i=0;i<2;i++) {
+            applyProjection(t,i,specs[i]);
+        }
     }
-    float visibleBrightness()throws Exception {
-        float value=(float)getBrightness.invoke(displays,0);
-        if(!Float.isFinite(value)||value<=0)throw new IllegalStateException("Default display has no visible brightness");
-        return Math.min(1,value);
+    void routeLogical(SurfaceControl.Transaction t,int innerDisplay,int outerDisplay)throws Exception {
+        int[] displayIds={innerDisplay,outerDisplay};
+        for(int panel=0;panel<tokens.length;panel++) {
+            int displayId=displayIds[panel];
+            ProjectionSpec spec=logicalProjection(displayId);
+            stack.invoke(t,tokens[panel],displayId);
+            applyProjection(t,panel,spec);
+        }
     }
-    void keepVisible(int index,float level)throws Exception {
+    private void applyProjection(SurfaceControl.Transaction t,int panel,ProjectionSpec spec)throws Exception {
+        Rect nativeBounds=bounds[panel];
+        // SurfaceFlinger applies rotation after mapping the layer-stack viewport.
+        // Its output rectangle therefore belongs to the oriented display space.
+        // Passing the natural portrait rectangle for a 90/270-degree projection
+        // makes SurfaceFlinger scale each axis by the opposite aspect ratio and
+        // crops fullscreen video after a fold transition.
+        boolean quarterTurn=(spec.rotation&1)!=0;
+        Rect output=quarterTurn
+            ?new Rect(0,0,nativeBounds.height(),nativeBounds.width())
+            :new Rect(nativeBounds);
+        projection.invoke(t,tokens[panel],spec.rotation,
+            new Rect(0,0,spec.width,spec.height),output);
+    }
+    void keepPowered(int index)throws Exception {
         if(index<0||index>=tokens.length)throw new IllegalArgumentException("Unknown physical panel "+index);
         power.invoke(null,tokens[index],POWER_MODE_NORMAL);
-        if(!((boolean)brightness.invoke(null,tokens[index],level)))
-            throw new IllegalStateException("Physical brightness rejected for panel "+index);
+    }
+    float visibleNits()throws Exception {
+        float value=(float)getBrightnessByUnit.invoke(displays,0,BRIGHTNESS_UNIT_NITS);
+        if(!Float.isFinite(value)||value<=1)
+            throw new IllegalStateException("Default display has no visible luminance");
+        return value;
+    }
+    void keepLuminanceMetadata(int index,float nits)throws Exception {
+        keepPowered(index);
+        // -1 leaves physical backlight control with Samsung's display controller.
+        // The explicit nits prevent its temporary screen-off metadata (1 nit) from
+        // blacking out our already-composed shield during the logical profile swap.
+        if(!Float.isFinite(nits)||nits<=1
+            ||!((boolean)luminance.invoke(null,tokens[index],-1f,nits,-1f,nits)))
+            throw new IllegalStateException("Physical luminance metadata rejected for panel "+index);
     }
     static boolean primaryIsInner()throws Exception {
         IBinder b=(IBinder)Class.forName("android.os.ServiceManager").getMethod("getService",String.class).invoke(null,"display");
