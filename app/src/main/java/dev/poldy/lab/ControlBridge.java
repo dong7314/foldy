@@ -4,6 +4,7 @@ import android.content.*;
 import android.content.pm.PackageManager;
 import android.os.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 import rikka.shizuku.Shizuku;
 
 final class ControlBridge {
@@ -11,6 +12,7 @@ final class ControlBridge {
     static volatile String status = "화면 제어 연결 대기";
     private static final ExecutorService worker = Executors.newSingleThreadExecutor();
     private static final Handler main = new Handler(Looper.getMainLooper());
+    private static final AtomicLong activeDisplayGeneration = new AtomicLong(Long.MIN_VALUE);
     private static Shizuku.UserServiceArgs args;
     interface Result { void done(String result); }
     private static final ServiceConnection connection = new ServiceConnection() {
@@ -31,7 +33,7 @@ final class ControlBridge {
             }
             if (remote != null) return;
             args = new Shizuku.UserServiceArgs(new ComponentName(context, DisplayControl.class))
-                .daemon(false).processNameSuffix("display_control").debuggable(false).version(44);
+                .daemon(false).processNameSuffix("display_control").debuggable(false).version(67);
             status = "화면 제어 연결 중";
             Shizuku.bindUserService(args, connection);
         } catch (RuntimeException e) { status = "화면 제어 연결 실패: " + e.getClass().getSimpleName(); }
@@ -80,6 +82,10 @@ final class ControlBridge {
     }
     static void stopAngles(){worker.execute(()->{try{if(remote!=null)remote.stopAngles();}catch(Exception ignored){}});}
     static void switchTo(boolean inner,long generation, Result callback) {
+        // Mark the new transfer before its Binder work reaches the serial worker.
+        // A settle queued by the previous endpoint must not power a panel down
+        // while this transfer is taking its snapshots or presenting its curtain.
+        activeDisplayGeneration.set(generation);
         worker.execute(() -> {
             String result;
             try { result = remote != null ? remote.requestMode(inner,generation) : "제어 연결이 없습니다."; }
@@ -97,6 +103,30 @@ final class ControlBridge {
         });
     }
     static void renew() { worker.execute(() -> { try { if (remote != null) remote.renew(); } catch (Exception ignored) {} }); }
-    static void reset() { worker.execute(() -> { try { if (remote != null) remote.reset(); } catch (Exception ignored) {} }); }
-    static void settle(boolean fullyOpen) { worker.execute(() -> { try { if (remote != null) remote.settle(fullyOpen); } catch (Exception ignored) {} }); }
+    static void reset() {
+        activeDisplayGeneration.set(Long.MIN_VALUE);
+        worker.execute(() -> { try { if (remote != null) remote.reset(); } catch (Exception ignored) {} });
+    }
+    static void resetBlocking() {
+        Future<?> reset=worker.submit(()->{try{if(remote!=null)remote.reset();}catch(Exception ignored){}});
+        try{reset.get(3,TimeUnit.SECONDS);}
+        catch(Exception e){reset.cancel(true);}
+    }
+    static void sleepBlocking() {
+        activeDisplayGeneration.set(Long.MIN_VALUE);
+        Future<?> sleep=worker.submit(()->{try{if(remote!=null)remote.sleep();}catch(Exception ignored){}});
+        try{sleep.get(3,TimeUnit.SECONDS);}
+        catch(Exception e){sleep.cancel(true);}
+    }
+    static void markTransition(long generation) { activeDisplayGeneration.set(generation); }
+    static void settle(boolean fullyOpen,long generation) {
+        worker.execute(() -> {
+            if(activeDisplayGeneration.get()!=generation) {
+                android.util.Log.i("PoldyControl","endpoint_power_release_skipped:generation="+generation);
+                return;
+            }
+            try { if (remote != null&&activeDisplayGeneration.get()==generation) remote.settle(fullyOpen); }
+            catch (Exception ignored) {}
+        });
+    }
 }

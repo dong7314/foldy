@@ -7,10 +7,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
-import android.media.projection.*;
-import android.net.Uri;
 import android.os.*;
-import android.provider.Settings;
 import android.view.*;
 import android.widget.*;
 import rikka.shizuku.Shizuku;
@@ -47,12 +44,12 @@ public final class MainActivity extends Activity {
         readings.setPadding(dp(18),dp(18),dp(18),dp(18));
         GradientDrawable card=new GradientDrawable();card.setColor(0xFF1F3038);card.setCornerRadius(dp(20));readings.setBackground(card);
         button(body,"1 · 화면 제어 연결",()->ControlBridge.connect(this));
-        button(body,"2 · 다른 앱 위에 표시 허용",()->startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-            Uri.parse("package:"+getPackageName()))));
-        button(body,"3 · 애니메이션 시작",this::startAnimation);
-        button(body,"애니메이션 중지",()->{stopService(new Intent(this,FoldService.class));ControlBridge.reset();});
+        button(body,"2 · 애니메이션 시작",this::startAnimation);
+        button(body,"애니메이션 중지",()->{
+            if(!stopService(new Intent(this,FoldService.class)))ControlBridge.reset();
+        });
         label(body,"완전히 접은 상태에서 시작해 주세요.\n기기의 접힘 각도에 맞춰 화면 효과를 움직이고, 각도 기록 사이를 자연스럽게 연결합니다.",14,0xFFB9C4CC);
-        label(body,"화면 공유는 전체 화면을 선택해 주세요. 이미지는 저장하거나 전송하지 않으며 기기 안에서만 처리합니다. 화면 잠금 또는 공유 종료 시 동작을 중지합니다.",13,0xFF91A6B1);
+        label(body,"화면 이미지는 저장하거나 전송하지 않으며 기기 안에서만 처리합니다. 화면 잠금 중에는 일시 정지하고 잠금 해제 후 자동으로 다시 준비합니다.",13,0xFF91A6B1);
         setContentView(scroll);
     }
     private void requestNotification() {
@@ -62,20 +59,8 @@ public final class MainActivity extends Activity {
     private void startAnimation() {
         if (FoldService.running) { Toast.makeText(this,"이미 실행 중입니다.",Toast.LENGTH_SHORT).show();return; }
         if (!ControlBridge.ready()) { ControlBridge.connect(this);return; }
-        if (!Settings.canDrawOverlays(this)) {
-            Toast.makeText(this,"다른 앱 위에 표시를 먼저 허용해 주세요.",Toast.LENGTH_LONG).show();return;
-        }
         requestNotification();
-        MediaProjectionManager manager=getSystemService(MediaProjectionManager.class);
-        Intent capture=Build.VERSION.SDK_INT>=34
-            ? manager.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
-            : manager.createScreenCaptureIntent();
-        startActivityForResult(capture,30);
-    }
-    @Override protected void onActivityResult(int request,int result,Intent data) {
-        super.onActivityResult(request,result,data);
-        if (request==30 && result==RESULT_OK && data!=null)
-            startForegroundService(new Intent(this,FoldService.class).putExtra("result",result).putExtra("consent",data));
+        startForegroundService(new Intent(this,FoldService.class));
     }
     private TextView label(LinearLayout parent,String text,int size,int color) {
         TextView v=new TextView(this);v.setText(text);v.setTextSize(size);v.setTextColor(color);v.setLineSpacing(dp(4),1);
