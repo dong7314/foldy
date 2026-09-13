@@ -9,16 +9,12 @@ import java.lang.reflect.Method;
 final class PhysicalPanels {
     static final long INNER=4630947004648141459L, OUTER=4630947123231501204L;
     private static final int POWER_MODE_NORMAL=2;
-    private static final int BRIGHTNESS_UNIT_NITS=2;
     private final IBinder[] tokens=new IBinder[2];
     private final Method stack=SurfaceControl.Transaction.class.getMethod("setDisplayLayerStack",IBinder.class,int.class);
     private final Method projection=SurfaceControl.Transaction.class.getMethod("setDisplayProjection",IBinder.class,int.class,Rect.class,Rect.class);
     private final Method power=SurfaceControl.class.getMethod("setDisplayPowerMode",IBinder.class,int.class);
-    private final Method luminance=SurfaceControl.class.getMethod("setDisplayBrightness",
-        IBinder.class,float.class,float.class,float.class,float.class);
     private final Object displays;
     private final Method getDisplayInfo;
-    private final Method getBrightnessByUnit;
     private final Rect[] bounds={new Rect(0,0,2448,1848),new Rect(0,0,1248,1972)};
     static final class ProjectionSpec {
         final int rotation,width,height;
@@ -33,7 +29,6 @@ final class PhysicalPanels {
         Class<?> displayApi=Class.forName("android.hardware.display.IDisplayManager");
         displays=Class.forName("android.hardware.display.IDisplayManager$Stub").getMethod("asInterface",IBinder.class).invoke(null,displayBinder);
         getDisplayInfo=displayApi.getMethod("getDisplayInfo",int.class);
-        getBrightnessByUnit=displayApi.getMethod("getBrightnessByUnit",int.class,int.class);
     }
     ProjectionSpec logicalProjection(int displayId)throws Exception {
         Object info=getDisplayInfo.invoke(displays,displayId);
@@ -79,21 +74,6 @@ final class PhysicalPanels {
     void keepPowered(int index)throws Exception {
         if(index<0||index>=tokens.length)throw new IllegalArgumentException("Unknown physical panel "+index);
         power.invoke(null,tokens[index],POWER_MODE_NORMAL);
-    }
-    float visibleNits()throws Exception {
-        float value=(float)getBrightnessByUnit.invoke(displays,0,BRIGHTNESS_UNIT_NITS);
-        if(!Float.isFinite(value)||value<=1)
-            throw new IllegalStateException("Default display has no visible luminance");
-        return value;
-    }
-    void keepLuminanceMetadata(int index,float nits)throws Exception {
-        keepPowered(index);
-        // -1 leaves physical backlight control with Samsung's display controller.
-        // The explicit nits prevent its temporary screen-off metadata (1 nit) from
-        // blacking out our already-composed shield during the logical profile swap.
-        if(!Float.isFinite(nits)||nits<=1
-            ||!((boolean)luminance.invoke(null,tokens[index],-1f,nits,-1f,nits)))
-            throw new IllegalStateException("Physical luminance metadata rejected for panel "+index);
     }
     static boolean primaryIsInner()throws Exception {
         IBinder b=(IBinder)Class.forName("android.os.ServiceManager").getMethod("getService",String.class).invoke(null,"display");

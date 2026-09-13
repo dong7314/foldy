@@ -19,7 +19,6 @@ final class NativeScene implements AutoCloseable {
     private volatile boolean closed,shielded;
     private boolean restoreFailed;
     private boolean innerPrimary;
-    private float pinnedNits;
     private PhysicalPanels.ProjectionSpec innerShieldProjection,outerShieldProjection;
     NativeScene(boolean inner)throws Exception {
         try {
@@ -40,15 +39,13 @@ final class NativeScene implements AutoCloseable {
         if(shielded)return;
         // FoldService has already fenced the opaque buffers on both panels.
         // Keep the physical outputs powered while Samsung swaps the logical displays.
-        // The two-argument brightness overload is unsafe on this firmware: it maps an
-        // ordinary logical level to 500 nits. Preserve only the current system nits
-        // through the five-argument API while leaving both backlight arguments at -1.
+        // Never write panel brightness here. Samsung's two-argument API can jump to
+        // maximum luminance, while its five-argument metadata path can clamp this
+        // device to minimum luminance. The system remains the sole brightness owner.
         // Freeze the current logical orientation before the display IDs swap. The
         // private shield stacks then keep exactly the same portrait/landscape space.
         innerShieldProjection=physical.logicalProjection(innerPrimary?0:1);
         outerShieldProjection=physical.logicalProjection(innerPrimary?1:0);
-        pinnedNits=physical.visibleNits();
-        android.util.Log.i("PoldyControl","physical_luminance_metadata_hold:nits="+pinnedNits);
         shielded=true;pinOnce();
         Future<?> innerOn=worker.submit(()->{outputOnce(0);return null;});
         Future<?> outerOn=worker.submit(()->{outputOnce(1);return null;});
@@ -72,7 +69,7 @@ final class NativeScene implements AutoCloseable {
         }
     }
     private void outputOnce(int panel) {
-        try{physical.keepLuminanceMetadata(panel,pinnedNits);}
+        try{physical.keepPowered(panel);}
         catch(Exception e){if(outputFailureLogged.compareAndSet(false,true))android.util.Log.e("PoldyControl","physical_output_pin_failed",e);}
     }
     private void pinOnce()throws Exception {
@@ -88,7 +85,7 @@ final class NativeScene implements AutoCloseable {
         try(SurfaceControl.Transaction t=new SurfaceControl.Transaction()) {
             layers(t,inner?0:1,inner?1:0);physical.routeLogical(t,inner?0:1,inner?1:0);t.apply();
         }
-        innerPrimary=inner;shielded=false;pinnedNits=0;innerShieldProjection=null;outerShieldProjection=null;
+        innerPrimary=inner;shielded=false;innerShieldProjection=null;outerShieldProjection=null;
     }
     private void cancelPins(){
         if(routePin!=null){routePin.cancel(false);routePin=null;}
