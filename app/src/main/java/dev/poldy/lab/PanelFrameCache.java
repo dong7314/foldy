@@ -7,7 +7,10 @@ final class PanelFrameCache<T> {
     private T inner,outer;
     private long innerAt,outerAt;
     boolean owner(String next) {
-        if(next!=null&&next.equals(owner))return false;
+        // A display-profile traversal can make ActivityTaskManager report no visible
+        // task for a single sample. Preserve both native frames until a concrete,
+        // different owner proves that the foreground content really changed.
+        if(next==null||next.equals(owner))return false;
         boolean changed=owner!=null||inner!=null||outer!=null;
         owner=next;inner=null;outer=null;return changed;
     }
@@ -20,5 +23,5 @@ final class PanelFrameCache<T> {
         if(now-outerAt>MAX_AGE_MILLIS)outer=null;return outer;
     }
     boolean references(T frame){return frame!=null&&(frame==inner||frame==outer);}
-    void clear(){owner(null);}
+    void clear(){owner=null;inner=null;outer=null;innerAt=0;outerAt=0;}
 }

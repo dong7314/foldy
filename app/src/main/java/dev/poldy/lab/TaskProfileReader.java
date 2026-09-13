@@ -32,7 +32,12 @@ final class TaskProfileReader {
         boolean inner=deviceType==0;
         boolean ready=(int)type.getField("displayId").get(task)==0&&mode==1
             &&bounds.left==0&&bounds.top==0&&(deviceType==0||deviceType==5)
-            &&bounds.width()==(inner?2448:1248)&&bounds.height()==(inner?1848:1972);
+            &&nativeBounds(inner,bounds.width(),bounds.height());
         return new Profile(owner,inner,ready);
+    }
+    static boolean nativeBounds(boolean inner,int width,int height) {
+        int naturalWidth=inner?2448:1248,naturalHeight=inner?1848:1972;
+        return (width==naturalWidth&&height==naturalHeight)
+            ||(width==naturalHeight&&height==naturalWidth);
     }
 }

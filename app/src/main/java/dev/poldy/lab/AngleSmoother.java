@@ -21,8 +21,11 @@ final class AngleSmoother {
             // Ignore near-duplicate fusion records when estimating the sparse log cadence.
             // A long physical pause must not turn the next movement into a long animation.
             if(seconds<.7f){
-                float desired=FoldOptics.clamp(seconds*.65f,.085f,.18f);
-                motionTau+=(desired-motionTau)*.35f;
+                // Samsung reports hinge changes in uneven bursts (roughly 80-400 ms
+                // in the physical trial). Spread a sparse step across most of its
+                // observed interval, and adapt quickly enough to avoid stop-go motion.
+                float desired=FoldOptics.clamp(seconds*.85f,.10f,.34f);
+                motionTau+=(desired-motionTau)*.6f;
             }
             cadenceNanos=sensorNanos;cadenceAngle=value;
         }
@@ -41,7 +44,7 @@ final class AngleSmoother {
             float dt=Math.min(remaining,.008f);remaining-=dt;
             float distance=target-value;
             float desired=FoldOptics.clamp(distance/(endpoint?.14f:motionTau),endpoint?-140:-480,endpoint?140:480);
-            float acceleration=endpoint?600:2400;
+            float acceleration=endpoint?600:1800;
             velocity+=FoldOptics.clamp(desired-velocity,-acceleration*dt,acceleration*dt);
             float delta=velocity*dt;
             if(Math.signum(delta)==Math.signum(distance)&&Math.abs(delta)>=Math.abs(distance)){

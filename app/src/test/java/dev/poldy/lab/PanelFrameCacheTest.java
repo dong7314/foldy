@@ -19,9 +19,9 @@ public class PanelFrameCacheTest {
         c.put(next,false,"2:appB",1);assertNull(c.get(true,2));assertFalse(c.references(old));
         c.owner("3:appB");assertNull(c.get(false,3));
     }
-    @Test public void unknownOwnerCannotPopulateOrPreserveCache(){
+    @Test public void transientUnknownOwnerDoesNotErasePresentedFrames(){
         PanelFrameCache<Object> c=new PanelFrameCache<>();Object old=new Object();
-        c.put(old,true,"task",0);assertTrue(c.owner(null));assertFalse(c.references(old));
+        c.put(old,true,"task",0);assertFalse(c.owner(null));assertTrue(c.references(old));
         c.put(old,false,null,1);assertNull(c.get(false,2));
     }
     @Test public void expirationDropsOnlyTheAgedPanel(){

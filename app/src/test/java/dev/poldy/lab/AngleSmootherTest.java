@@ -50,6 +50,22 @@ public class AngleSmootherTest {
             assertTrue(after<=sample*12);
         }
     }
+    @Test public void verySparseSamplesUseTheIntervalWithoutFrameJumps(){
+        AngleSmoother s=new AngleSmoother();s.step(1000);
+        for(int sample=1;sample<=6;sample++){
+            long start=1000+(sample-1)*400;
+            s.measuredTarget(sample*10,start*1_000_000L);
+            float previous=s.value(),lateMotion=0;
+            for(int dt=8;dt<=400;dt+=8){
+                float value=s.step(start+dt);
+                assertTrue("Sparse input created a visible frame jump",value-previous<.65f);
+                if(dt>360)lateMotion+=value-previous;
+                previous=value;
+            }
+            // The first target has no preceding interval to learn from.
+            if(sample>1)assertTrue("Sparse input stopped well before its next sample",lateMotion>.25f);
+        }
+    }
     @Test public void sparseTargetStopsAndReversesWithoutResettingTheDisplayedAngle(){
         AngleSmoother s=new AngleSmoother();s.step(1000);
         s.measuredTarget(90,1_000_000_000L);
