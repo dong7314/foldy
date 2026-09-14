@@ -8,6 +8,9 @@ final class AngleSmoother {
     private long cadenceNanos;
     private float cadenceAngle;
     private float motionTau=.12f;
+    void reset(float initial){
+        value=target=FoldOptics.clamp(initial,0,180);velocity=0;last=0;cadenceNanos=0;endpoint=false;motionTau=.12f;
+    }
     void target(float value,boolean endpoint){
         if(!Float.isFinite(value))return;
         target=FoldOptics.clamp(value,0,180);this.endpoint=endpoint;

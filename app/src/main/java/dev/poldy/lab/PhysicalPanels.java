@@ -13,6 +13,7 @@ final class PhysicalPanels {
     private final Method stack=SurfaceControl.Transaction.class.getMethod("setDisplayLayerStack",IBinder.class,int.class);
     private final Method projection=SurfaceControl.Transaction.class.getMethod("setDisplayProjection",IBinder.class,int.class,Rect.class,Rect.class);
     private final Method power=SurfaceControl.class.getMethod("setDisplayPowerMode",IBinder.class,int.class);
+    private final Method brightness=SurfaceControl.class.getMethod("setDisplayBrightness",IBinder.class,float.class,float.class,float.class,float.class);
     private final Object displays;
     private final Method getDisplayInfo;
     private final Rect[] bounds={new Rect(0,0,2448,1848),new Rect(0,0,1248,1972)};
@@ -74,6 +75,19 @@ final class PhysicalPanels {
     void keepPowered(int index)throws Exception {
         if(index<0||index>=tokens.length)throw new IllegalArgumentException("Unknown physical panel "+index);
         power.invoke(null,tokens[index],POWER_MODE_NORMAL);
+    }
+    float currentNits()throws Exception {
+        return (float)Class.forName("android.hardware.display.IDisplayManager")
+            .getMethod("getBrightnessByUnit",int.class,int.class).invoke(displays,0,2);
+    }
+    void keepLuminance(int index,PanelLuminance sample)throws Exception {
+        long physical=index==0?INNER:OUTER;
+        if(sample==null||!sample.sdr()||sample.physicalId()!=physical)
+            throw new IllegalArgumentException("Luminance belongs to a different output");
+        // The four values are SDR backlight, SDR nits, display backlight, display nits.
+        // -1 means OFF on this firmware. A logical Settings value is not a backlight.
+        if(!(boolean)brightness.invoke(null,tokens[index],sample.backlight(),sample.sdrNits(),sample.backlight(),sample.nits()))
+            throw new IllegalStateException("Physical luminance rejected");
     }
     static boolean primaryIsInner()throws Exception {
         IBinder b=(IBinder)Class.forName("android.os.ServiceManager").getMethod("getService",String.class).invoke(null,"display");

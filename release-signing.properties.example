@@ -1,0 +1,7 @@
+# Copy outside this repository. Set FOLDY_SIGNING_PROPERTIES to the copied file's absolute path.
+# Do not use the Android debug keystore. PKCS12 generally uses the same key/store password.
+storeFile=/absolute/private/path/foldy-release.p12
+storeType=PKCS12
+keyAlias=foldy-release
+storePassword=REPLACE_LOCALLY
+keyPassword=REPLACE_LOCALLY

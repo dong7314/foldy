@@ -5,3 +5,8 @@ measurements/
 .idea/
 *.iml
 __pycache__/
+dist/
+*.jks
+*.keystore
+*.p12
+*signing*.properties

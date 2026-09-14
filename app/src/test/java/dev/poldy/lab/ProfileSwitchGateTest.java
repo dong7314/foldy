@@ -32,4 +32,22 @@ public class ProfileSwitchGateTest {
         assertFalse(g.canFinish(12,1000));assertFalse(g.pending);
         assertTrue(g.begin(0,false,2000,false));
     }
+    @Test public void firmwareCloseWaitsForCoveredReversalWithoutResettingTheGeneration(){
+        ProfileSwitchGate g=new ProfileSwitchGate();g.begin(1,true,0,true);g.finished();
+        assertFalse(g.canReassert(false));assertTrue(g.matches(1,true));
+        assertTrue(g.begin(2,false,1000,true));
+        assertFalse(g.matches(1,true));assertTrue(g.canReassert(false));
+        g.observe(true,1100);
+        assertFalse(g.canFinish(2,1649));assertTrue(g.canFinish(2,1650));
+    }
+    @Test public void canceledRequestMayReassertWithinItsExistingShield(){
+        ProfileSwitchGate g=new ProfileSwitchGate();g.begin(1,true,0,true);
+        assertTrue(g.canReassert(false));
+        g.finished();assertTrue(g.canReassert(true));assertFalse(g.canReassert(false));
+    }
+    @Test public void restingCoverAndResetHaveDifferentRestorePolicies(){
+        ProfileSwitchGate g=new ProfileSwitchGate();g.begin(1,false,0,false);
+        assertTrue(g.canReassert(false));assertFalse(g.canReassert(true));
+        g.reset();assertFalse(g.canReassert(false));assertFalse(g.canReassert(true));
+    }
 }

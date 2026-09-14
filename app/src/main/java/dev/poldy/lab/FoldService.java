@@ -15,6 +15,8 @@ import java.util.ArrayList;
 public final class FoldService extends Service implements SensorEventListener,DisplayManager.DisplayListener {
     public static final String STOP="dev.poldy.lab.FOLD_STOP";
     public static volatile boolean running;
+    public static volatile boolean prepared;
+    public static volatile boolean suspended;
     public static volatile String status="애니메이션 대기";
     private final Handler main=new Handler(Looper.getMainLooper());
     private FoldSignals signals=new FoldSignals();
@@ -26,6 +28,18 @@ public final class FoldService extends Service implements SensorEventListener,Di
     private final FrameRetirement<Bitmap> retiredFrames=new FrameRetirement<>();
     private final PanelFrameCache<Bitmap> nativeFrames=new PanelFrameCache<>();
     private long contentEpoch;
+    private boolean privacyBlocked=true;
+    private long privacyEpoch=-1;
+    private final java.util.IdentityHashMap<Bitmap,Integer> snapshotSources=new java.util.IdentityHashMap<>();
+    private final java.util.Set<Bitmap> discardAfterSnapshot=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    private final IPrivacyListener privacyListener=new IPrivacyListener.Stub(){
+        @Override public void onPrivacyChanged(boolean blocked,long epoch){main.post(()->{
+            if(!active||epoch<privacyEpoch)return;
+            privacyEpoch=epoch;privacyBlocked=blocked;
+            if(blocked)pausePipeline("보호 중인 화면 · 다른 앱으로 이동하면 자동 재개");
+            else scheduleResume();
+        });}
+    };
     private long invalidProfileSince;
     private boolean outputReleased=true,outputReleasePending,latestNativeReady;
     private boolean endpointPowerSettled;
@@ -33,10 +47,12 @@ public final class FoldService extends Service implements SensorEventListener,Di
     private boolean active,paused,initializing,resumePending,moving,curtain,capturing;
     private float frost=1,contentMix;
     private long transitionAt;
+    private int preparationFrames;
     private int frameCount;
     private int startupCaptureRetries;
     private FrameTween finish,handoff;
     private boolean logicalInner;
+    private Boolean deferredTransfer;
     private long lastAngleNanos;
     private float measuredAngle;
     private int angleSamples;
@@ -85,19 +101,19 @@ public final class FoldService extends Service implements SensorEventListener,Di
         if(active)return START_NOT_STICKY;
         PendingIntent stop=PendingIntent.getService(this,3,new Intent(this,FoldService.class).setAction(STOP),PendingIntent.FLAG_IMMUTABLE);
         startForeground(2,new Notification.Builder(this,"fold").setSmallIcon(android.R.drawable.ic_menu_view)
-            .setContentTitle("Poldy · 두 화면 연결").setContentText("접힘 각도에 맞춰 두 패널의 화면을 연결합니다.")
+            .setContentTitle("Foldy · 접힘 애니메이션").setContentText("접힘 각도에 맞춰 두 패널의 화면을 연결합니다.")
             .setOngoing(true).addAction(new Notification.Action.Builder(null,"중지",stop).build())
             .setContentIntent(PendingIntent.getActivity(this,4,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE)).build(),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         try{
             if(!ControlBridge.ready())throw new IllegalStateException("화면 제어 연결을 확인해 주세요.");
-            active=true;running=true;paused=true;displays.registerDisplayListener(this,main);
-            main.post(lease);startPipeline();
+            active=true;running=true;prepared=false;suspended=false;paused=true;displays.registerDisplayListener(this,main);
+            main.post(lease);ControlBridge.watchPrivacy(privacyListener,error->{if(active&&error!=null)fail(error);});
         }catch(RuntimeException e){fail(e.toString());}
         return START_NOT_STICKY;
     }
     private void startPipeline(){
-        if(!active||initializing||!paused)return;
+        if(!active||initializing||!paused||privacyBlocked)return;
         if(locked()){status="화면 잠금 중 · 잠금 해제 후 자동 재개";return;}
         try{
             Display display=displays.getDisplay(Display.DEFAULT_DISPLAY);
@@ -107,9 +123,10 @@ public final class FoldService extends Service implements SensorEventListener,Di
             logicalInner=width==2448;
             transfer.inner=logicalInner;transfer.phase=TransferGate.Phase.READY;
             signals=new FoldSignals();progress=new HingeProgress();visual=new AngleSmoother();attitude=new FoldAttitude();
-            measuredAngle=logicalInner?180:0;opticalAngle=measuredAngle;lastAngleNanos=0;angleSamples=0;
+            measuredAngle=logicalInner?180:0;visual.reset(measuredAngle);opticalAngle=measuredAngle;lastAngleNanos=0;angleSamples=0;
             pendingOpticsAnchor=Float.NaN;moving=false;curtain=false;capturing=false;snapshotPending=false;
             pendingReveal=false;releasePending=false;outputReleased=true;outputReleasePending=false;
+            deferredTransfer=null;
             latestNativeReady=false;endpointPowerSettled=false;invalidProfileSince=0;startupCaptureRetries=0;
             primaryOpacity=0;frost=1;contentMix=0;renderedFrames=0;renderCost=0;
             Sensor sensor=sensors.getDefaultSensor(Sensor.TYPE_HINGE_ANGLE);
@@ -119,7 +136,7 @@ public final class FoldService extends Service implements SensorEventListener,Di
             if(gyro!=null)sensors.registerListener(this,gyro,20_000,main);
             Sensor gravity=sensors.getDefaultSensor(Sensor.TYPE_GRAVITY);
             if(gravity!=null)sensors.registerListener(this,gravity,40_000,main);
-            paused=false;initializing=true;long epoch=++pipelineEpoch;
+            paused=false;suspended=false;initializing=true;long epoch=++pipelineEpoch;
             status="화면 잠금 해제됨 · 두 화면 다시 준비 중";
             main.postDelayed(()->{
                 if(active&&!paused&&epoch==pipelineEpoch&&latest==null)
@@ -127,6 +144,8 @@ public final class FoldService extends Service implements SensorEventListener,Di
             },3500);
             ControlBridge.switchTo(isInner(),transfer.generation,result->{
                 if(!active||paused||epoch!=pipelineEpoch)return;
+                if("WAIT_ENDPOINT".equals(result)){pausePipeline("완전히 접거나 펼치면 자동 재개");return;}
+                if("PRIVACY_BLOCKED".equals(result)){privacyBlocked=true;pausePipeline("보호 중인 화면 · 다른 앱으로 이동하면 자동 재개");return;}
                 if(!"OK".equals(result)){fail(result);return;}
                 ControlBridge.createScene(isInner(),(panels,error)->{
                     if(!active||paused||epoch!=pipelineEpoch){
@@ -145,20 +164,25 @@ public final class FoldService extends Service implements SensorEventListener,Di
             });
         }catch(RuntimeException e){fail(e.toString());}
     }
-    private void pauseForLock(){
-        if(!active||paused)return;
-        paused=true;initializing=false;resumePending=false;pipelineEpoch++;transfer.generation++;
+    private void pauseForLock(){pausePipeline("화면 잠금 중 · 잠금 해제 후 자동 재개");}
+    private void pausePipeline(String reason){
+        if(!active)return;
+        status=reason;suspended=true;
+        if(paused)return;
+        paused=true;prepared=false;initializing=false;resumePending=false;pipelineEpoch++;transfer.generation++;
         moving=false;capturing=false;snapshotPending=false;cancelAnimations();
         choreographer.removeFrameCallback(vsync);main.removeCallbacks(renderFallback);renderQueued=false;
-        status="화면 잠금 중 · 잠금 해제 후 자동 재개";
+        contentEpoch++;
+        // Hide and discard before waiting for any remote display restoration.
+        releasePipeline();
         // A sleep teardown releases every power token so the service cannot keep a
         // physical panel awake. The foreground service remains available to resume.
-        ControlBridge.sleepBlocking();releasePipeline();
+        ControlBridge.sleepBlocking();
         sensors.unregisterListener(this);
-        Log.i("PoldyFold","native_paused:screen_locked");
+        Log.i("PoldyPrivacy","pipeline_paused:cache_cleared, privacy="+privacyBlocked);
     }
     private void scheduleResume(){
-        if(!active||!paused||resumePending)return;
+        if(!active||!paused||resumePending||privacyBlocked)return;
         resumePending=true;
         main.postDelayed(()->{
             resumePending=false;
@@ -169,8 +193,9 @@ public final class FoldService extends Service implements SensorEventListener,Di
         if(innerPanel!=null){innerPanel.close();innerPanel=null;}
         if(outerPanel!=null){outerPanel.close();outerPanel=null;}
         nativeFrames.clear();
-        recycle(outgoingFrame);outgoingFrame=null;recycle(heldTarget);heldTarget=null;recycle(latest);latest=null;
-        retiredFrames.close(FoldService::recycle);
+        deferredTransfer=null;
+        releaseFrame(outgoingFrame);outgoingFrame=null;releaseFrame(heldTarget);heldTarget=null;releaseFrame(latest);latest=null;
+        retiredFrames.close(this::releaseFrame);
     }
     private boolean locked(){return getSystemService(KeyguardManager.class).isKeyguardLocked();}
     private boolean isInner(){return logicalInner;}
@@ -200,9 +225,11 @@ public final class FoldService extends Service implements SensorEventListener,Di
         if(!active||paused||capturing)return;if(locked()){pauseForLock();return;}
         if(innerPanel==null||outerPanel==null)return;
         ArrayList<SurfaceControl> layers=new ArrayList<>();layers.add(innerPanel.control);layers.add(outerPanel.control);
-        boolean inner=isInner();long generation=transfer.generation;capturing=true;long captureStarted=SystemClock.uptimeMillis();
+        boolean inner=isInner();long generation=transfer.generation,epoch=pipelineEpoch;capturing=true;long captureStarted=SystemClock.uptimeMillis();
         ControlBridge.capture(inner,layers.toArray(new SurfaceControl[0]),(bitmap,info,error)->{
-            capturing=false;if(!active||paused){if(bitmap!=null)bitmap.recycle();return;}
+            if(epoch!=pipelineEpoch){recycle(bitmap);return;}
+            capturing=false;if(!active||paused){recycle(bitmap);return;}
+            if("PRIVACY_BLOCKED".equals(error)){pausePipeline("보호 중인 화면 · 다른 앱으로 이동하면 자동 재개");return;}
             if(bitmap==null){
                 // The mirror's first Surface transaction can finish after createScene returns.
                 if(latest==null&&error!=null&&error.contains("No logical buffer")&&startupCaptureRetries++<12){
@@ -230,7 +257,11 @@ public final class FoldService extends Service implements SensorEventListener,Di
             invalidProfileSince=0;
             Bitmap old=latest;latest=bitmap;retire(old);
             boolean correctSize=TaskProfileReader.nativeBounds(inner,bitmap.getWidth(),bitmap.getHeight());
-            if(correctSize){primary().resize(bitmap.getWidth(),bitmap.getHeight());nativeFrames.put(bitmap,inner,info.owner(),SystemClock.uptimeMillis());}
+            if(correctSize){prepared=true;primary().resize(bitmap.getWidth(),bitmap.getHeight());nativeFrames.put(bitmap,inner,info.owner(),SystemClock.uptimeMillis());}
+            if(correctSize&&deferredTransfer!=null){
+                boolean target=deferredTransfer;deferredTransfer=null;
+                if(target!=inner||moving)beginTransfer(target);
+            }
             if(correctSize&&!curtain&&!moving&&!endpointPowerSettled){
                 endpointPowerSettled=true;ControlBridge.settle(inner,transfer.generation);
             }
@@ -245,7 +276,7 @@ public final class FoldService extends Service implements SensorEventListener,Di
                 Log.i("PoldyFold","base_signal:"+info.baseState()+", action="+early);
                 handleSignal(early,false);
             }
-            long cadence=moving||curtain?16:80;
+            long cadence=moving||curtain?16:240;
             main.postDelayed(this::captureNext,Math.max(0,cadence-(SystemClock.uptimeMillis()-captureStarted)));
         });
     }
@@ -256,7 +287,7 @@ public final class FoldService extends Service implements SensorEventListener,Di
         choreographer.postFrameCallback(vsync);main.postDelayed(renderFallback,18);
     }
     private void renderNow(){
-        if(!active||paused||snapshotPending||latest==null||innerPanel==null||outerPanel==null)return;
+        if(!active||paused||latest==null||innerPanel==null||outerPanel==null)return;
         long renderStarted=SystemClock.uptimeMillis();
         applyProgress(progress.tick(renderStarted));
         opticalAngle=visual.step(renderStarted);
@@ -267,14 +298,27 @@ public final class FoldService extends Service implements SensorEventListener,Di
         innerPanel.orientation(gravityX,gravityY,flatness);outerPanel.orientation(gravityX,gravityY,flatness);
         innerPanel.attitude(attitude.pitch(),attitude.yaw(),attitude.roll());
         outerPanel.attitude(attitude.pitch(),attitude.yaw(),attitude.roll());
+        if(snapshotPending){
+            // Only the destination is waiting on a GPU snapshot. Keep the other
+            // panel moving, without overwriting a same-panel reversal's hold.
+            if(transfer.canAnimateOutgoing(inner)&&primary.matches(outgoingFrame)){
+                primary.frame(outgoingFrame,inner,1,0);
+                setPrimaryOpacity(1);
+                if(++preparationFrames==1)Log.i("PoldyFold","source_motion_during_prepare:panel="+(inner?"inner":"outer")
+                    +", elapsed="+(renderStarted-transitionAt)+", measured="+measuredAngle+", visual="+opticalAngle);
+                if(!primary.healthy){fail("GPU 화면 표시 오류로 시험을 중지했습니다.");return;}
+            }
+            if(visual.animating())render();
+            return;
+        }
         if(curtain){
             if(inner!=transfer.inner){
                 primary.frame(primary.matches(outgoingFrame)?outgoingFrame:null,inner,frost,0);
-            }else if(transfer.phase!=TransferGate.Phase.READY||!latestNativeReady||!primary.matches(latest))primary.hold(heldTarget);
-            else primary.reveal(heldTarget,latest,contentMix,inner,frost,0);
+            }else if(transfer.phase!=TransferGate.Phase.READY||!latestNativeReady||!primary.matches(latest))primary.frame(heldTarget,inner,frost,0);
+            else primary.blend(heldTarget,latest,contentMix,inner,frost,0);
         } else primary.frame(nativeFrames.get(inner,renderStarted),inner,0,0);
         if(curtain){
-            if(inner!=transfer.inner)secondary.hold(heldTarget);
+            if(inner!=transfer.inner)secondary.frame(heldTarget,!inner,frost,0);
             else secondary.frame(secondary.matches(outgoingFrame)?outgoingFrame:null,!inner,1,0);
         }else secondary.frame(nativeFrames.get(!inner,renderStarted),!inner,1,0);
         primary.opacity(primaryOpacity);secondary.opacity(1);
@@ -294,10 +338,20 @@ public final class FoldService extends Service implements SensorEventListener,Di
         }
         if(visual.animating())render();
         retiredFrames.collect(SystemClock.uptimeMillis(),frame->frame==latest||frame==outgoingFrame||frame==heldTarget
-            ||nativeFrames.references(frame)
+            ||snapshotSources.containsKey(frame)||nativeFrames.references(frame)
             ||(innerPanel!=null&&innerPanel.references(frame))||(outerPanel!=null&&outerPanel.references(frame)),FoldService::recycle);
     }
     private void retire(Bitmap frame){retiredFrames.retire(frame,SystemClock.uptimeMillis());}
+    private void releaseFrame(Bitmap frame){
+        if(frame!=null&&snapshotSources.containsKey(frame))discardAfterSnapshot.add(frame);
+        else recycle(frame);
+    }
+    private void snapshotFinished(Bitmap source){
+        if(source==null)return;
+        int refs=snapshotSources.getOrDefault(source,1)-1;
+        if(refs>0)snapshotSources.put(source,refs);
+        else {snapshotSources.remove(source);if(discardAfterSnapshot.remove(source))recycle(source);}
+    }
     private static void recycle(Bitmap frame){if(frame!=null&&!frame.isRecycled())frame.recycle();}
     @Override public void onSensorChanged(SensorEvent event){
         if(!active||paused||event.values.length==0||!Float.isFinite(event.values[0]))return;
@@ -354,28 +408,30 @@ public final class FoldService extends Service implements SensorEventListener,Di
     }
     private void beginTransfer(boolean inner){
         if(locked()){pauseForLock();return;}
-        if(latest==null){fail("전환 전 화면이 준비되지 않았습니다. 다시 시작해 주세요.");return;}
+        if(latest==null){
+            // A posture callback can beat the first capture after unlock. Replay only the
+            // newest requested panel once a validated native frame can cover the change.
+            deferredTransfer=inner;return;
+        }
         if(!curtain)renderNow();
         cancelAnimations();
         Bitmap held=nativeFrames.get(isInner(),SystemClock.uptimeMillis());
         Bitmap retired=outgoingFrame;outgoingFrame=held;
         retire(retired);
         long token=transfer.begin(inner);ControlBridge.markTransition(token);
-        transitionAt=SystemClock.uptimeMillis();snapshotPending=true;
+        transitionAt=SystemClock.uptimeMillis();snapshotPending=true;preparationFrames=0;
         endpointPowerSettled=false;
         outputReleased=false;outputReleasePending=false;latestNativeReady=false;
         invalidProfileSince=0;
         long epoch=contentEpoch;
         NativePanel target=inner?innerPanel:outerPanel;
-        // Reuse an in-progress native hold only within the same task; otherwise prepare
-        // from a validated native cache (null draws an opaque content-free surface).
-        if(!curtain||heldTarget==null){
-            Bitmap nativeTarget=nativeFrames.get(inner,transitionAt);
-            if(nativeTarget!=null)target.frame(nativeTarget,inner,1,0);
-            else if(held!=null)target.transitionPlaceholder(held,inner);
-            else target.frame(null,inner,1,0);
-        }
-        target.snapshot(main,snapshot->{
+        // Prepare raw content off-screen. Optical deformation remains live on every vsync,
+        // including the time spent waiting for Samsung's native app layout.
+        Bitmap nativeTarget=nativeFrames.get(inner,transitionAt);
+        Bitmap source=nativeTarget!=null?nativeTarget:target.matches(heldTarget)?heldTarget:held;
+        if(source!=null)snapshotSources.merge(source,1,Integer::sum);
+        target.snapshotRaw(source,main,snapshot->{
+            snapshotFinished(source);
             if(!active||token!=transfer.generation){if(snapshot!=null)snapshot.recycle();return;}
             if(epoch!=contentEpoch){recycle(snapshot);snapshotPending=false;beginTransfer(inner);return;}
             snapshotPending=false;
@@ -384,7 +440,8 @@ public final class FoldService extends Service implements SensorEventListener,Di
             retire(oldHold);
             curtain=true;frost=1;contentMix=0;setPrimaryOpacity(1);
             status=inner?"펼침 · 내부 화면 연결 중":"접힘 · 외부 화면 연결 중";renderNow();
-            Log.i("PoldyFold","panel_hold_ready:"+snapshot.getWidth()+"x"+snapshot.getHeight()+", elapsed="+(SystemClock.uptimeMillis()-transitionAt));
+            Log.i("PoldyFold","panel_hold_ready:"+snapshot.getWidth()+"x"+snapshot.getHeight()+", elapsed="+(SystemClock.uptimeMillis()-transitionAt)
+                +", source_frames="+preparationFrames+", visual="+opticalAngle);
             // Keep each panel's own presented image until its new native-size layout is ready.
             secondary().whenVisible(getMainExecutor(),()->{
               if(!active||token!=transfer.generation)return;
@@ -399,6 +456,7 @@ public final class FoldService extends Service implements SensorEventListener,Di
               });
             });
         });
+        render();
         main.postDelayed(()->{if(active&&token==transfer.generation&&(transfer.phase!=TransferGate.Phase.READY||!outputReleased))fail("새 화면을 준비하지 못해 시험을 중지했습니다.");},3000);
     }
     private void releaseOutput(long token){
@@ -466,13 +524,14 @@ public final class FoldService extends Service implements SensorEventListener,Di
     @Override public IBinder onBind(Intent intent){return null;}
     @Override public void onDestroy(){
         boolean sleeping=paused||locked();
-        active=false;paused=true;running=false;main.removeCallbacksAndMessages(null);transfer.generation++;pipelineEpoch++;
+        active=false;paused=true;running=false;prepared=false;suspended=false;main.removeCallbacksAndMessages(null);transfer.generation++;pipelineEpoch++;
         cancelAnimations();
         choreographer.removeFrameCallback(vsync);main.removeCallbacks(renderFallback);renderQueued=false;
         // Restore the system display state while our last opaque frame still covers
         // the physical outputs. Closing these layers first exposes an empty stack.
-        if(sleeping)ControlBridge.sleepBlocking();else ControlBridge.resetBlocking();
-        releasePipeline();
+        if(sleeping){releasePipeline();ControlBridge.sleepBlocking();}
+        else {ControlBridge.resetBlocking();releasePipeline();}
+        ControlBridge.watchPrivacy(null,error->{});
         sensors.unregisterListener(this);displays.unregisterDisplayListener(this);
         try{unregisterReceiver(screenReceiver);}catch(IllegalArgumentException ignored){}
         stopForeground(STOP_FOREGROUND_REMOVE);Log.i("PoldyFold","native_stopped:state_reset");super.onDestroy();

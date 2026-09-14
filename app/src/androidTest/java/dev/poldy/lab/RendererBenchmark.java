@@ -13,16 +13,48 @@ import org.json.*;
 public final class RendererBenchmark extends Instrumentation {
     private final ExecutorService callbacks=Executors.newSingleThreadExecutor();
     private File directory;
-    private boolean entryOnly,edgeOnly;
+    private boolean entryOnly,edgeOnly,motionOnly,uiOnly,transferOnly;
     @Override public void onCreate(Bundle args){
         super.onCreate(args);entryOnly=args!=null&&"true".equals(args.getString("entryOnly"));
-        edgeOnly=args!=null&&"true".equals(args.getString("edgeOnly"));start();
+        uiOnly=args!=null&&"true".equals(args.getString("uiOnly"));
+        transferOnly=args!=null&&"true".equals(args.getString("transferOnly"));
+        edgeOnly=args!=null&&"true".equals(args.getString("edgeOnly"));
+        motionOnly=args!=null&&"true".equals(args.getString("motionOnly"));start();
     }
     @Override public void onStart(){
         Bundle result=new Bundle();
         try {
+            if(transferOnly){result.putString("stream",TransitionPreparationBenchmark.run());finish(Activity.RESULT_OK,result);return;}
             directory=new File(getTargetContext().getFilesDir(),"renderer-benchmark");
             if(!directory.isDirectory()&&!directory.mkdirs())throw new IOException("Output directory unavailable");
+            if(uiOnly){SetupUiBenchmark.run(this,directory);result.putString("stream","Setup states, primary action bounds, settings and reduced-motion screenshots passed");finish(Activity.RESULT_OK,result);return;}
+            if(motionOnly){
+                for(boolean inner:new boolean[]{false,true}){
+                    String panel=inner?"inner":"outer";float middle=inner?110:65;
+                    try(Target target=new Target(inner,true)){
+                        for(int angle:new int[]{0,1,2,6,12,45,90,135,168,174,178,179,180}){
+                            target.draw(angle,0,1,0);target.save(panel+"-motion-angle-"+angle+".png");
+                        }
+                        target.draw(middle,0,1,0);target.save(panel+"-motion-neutral.png");
+                        target.draw(middle+17,0,1,0);target.draw(middle,0,1,0);
+                        target.save(panel+"-motion-returned.png");
+                        for(int tilt:new int[]{-1,1}){
+                            target.renderer.attitude(tilt*.5f,tilt*.35f,tilt*.4f);
+                            target.draw(middle,0,1,0);target.save(panel+"-motion-gyro-"+tilt+".png");
+                        }
+                        target.draw(inner?180:0,.6f,.3f,.8f);target.save(panel+"-motion-endpoint-tilted.png");
+                        target.renderer.attitude(0,0,0);
+                        target.draw(middle,.6f,.3f,.8f);target.save(panel+"-motion-gravity.png");
+                    }
+                    try(Target target=new Target(inner,true,true)){
+                        for(int tilt:new int[]{-1,0,1}){
+                            target.renderer.attitude(tilt*.5f,tilt*.35f,tilt*.4f);
+                            target.draw(middle,.3f,.8f,.6f);target.save(panel+"-motion-solid-"+tilt+".png");
+                        }
+                    }
+                }
+                result.putString("stream","Motion, reversal, endpoint and feather GPU samples completed");finish(Activity.RESULT_OK,result);return;
+            }
             if(edgeOnly){
                 JSONArray cases=new JSONArray();
                 for(boolean inner:new boolean[]{false,true}){
@@ -106,7 +138,10 @@ public final class RendererBenchmark extends Instrumentation {
             output=new HardwareBufferRenderer(buffer);root.setPosition(0,0,w,h);output.setContentRoot(root);
         }
         void draw(float angle,float flatness)throws Exception {
-            renderer.orientation(.2f,.8f,flatness);
+            draw(angle,.2f,.8f,flatness);
+        }
+        void draw(float angle,float gx,float gy,float flatness)throws Exception {
+            renderer.orientation(gx,gy,flatness);
             RecordingCanvas c=root.beginRecording(w,h);c.drawColor(Color.TRANSPARENT,PorterDuff.Mode.CLEAR);
             renderer.draw(c,w,h,null,source,1,FoldOptics.at(inner,angle),1,0);root.endRecording();
             CountDownLatch ready=new CountDownLatch(1);Throwable[] failure={null};

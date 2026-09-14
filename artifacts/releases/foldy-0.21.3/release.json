@@ -1,0 +1,24 @@
+{
+  "applicationId": "dev.poldy.lab",
+  "versionCode": 80,
+  "versionName": "0.21.3",
+  "signerCertificateSha256": "106d60d946941e1d17a69fd88b25812bea01899dbf0a8523f385200e65a2cc04",
+  "debuggable": false,
+  "checks": [
+    "APK signature",
+    "non-debug certificate",
+    "non-debug manifest",
+    "no test classes",
+    "no platform replacement classes",
+    "privileged entry points preserved",
+    "font license"
+  ],
+  "builtAtUtc": "2026-09-14T08:02:15.502781+00:00",
+  "sourceCommit": "4dcad8d874988304920736ed47d03e306f60c0e2",
+  "sourceHasUncommittedChanges": true,
+  "requiresShizuku": true,
+  "files": {
+    "foldy-0.21.3-release.apk": "4c80dd5c6eec217d74aa5e333b943cc86dbc13a589b7e06f5d67112771304234"
+  },
+  "supportedAnimationDevice": "Samsung SM-F971N / Android 17"
+}

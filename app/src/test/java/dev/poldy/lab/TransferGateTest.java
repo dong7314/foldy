@@ -27,4 +27,37 @@ public class TransferGateTest {
         TransferGate g=new TransferGate();long t=g.begin(false);g.covered(t);g.frame(t,false);
         assertTrue(g.frame(t,false));assertFalse(g.frame(t,false));
     }
+    @Test public void delayedSnapshotKeepsSourceMovingWithoutRevealingDestination(){
+        for(boolean destinationInner:new boolean[]{true,false}){
+            TransferGate g=new TransferGate();AngleSmoother visual=new AngleSmoother();
+            visual.target(destinationInner?0:180,false);
+            for(long now=1000;now<=4000;now+=16)visual.step(now);
+            float before=visual.value();
+            long token=g.begin(destinationInner);
+            visual.target(destinationInner?30:150,false);
+            for(long now=4016;now<=4192;now+=16){
+                assertTrue(g.canAnimateOutgoing(!destinationInner));
+                assertFalse(g.canAnimateOutgoing(destinationInner));
+                visual.step(now);
+                assertFalse(g.frame(token,destinationInner));
+                assertEquals(TransferGate.Phase.COVERING,g.phase);
+            }
+            assertTrue(Math.abs(visual.value()-before)>5);
+            assertTrue(g.covered(token));
+            assertFalse(g.canAnimateOutgoing(!destinationInner));
+            assertFalse(g.frame(token,destinationInner));
+            assertTrue(g.frame(token,destinationInner));
+        }
+    }
+    @Test public void reversalBackToCurrentPanelProtectsItsSnapshot(){
+        TransferGate g=new TransferGate();long open=g.begin(true);
+        assertTrue(g.canAnimateOutgoing(false));
+        long reverse=g.begin(false);
+        // The cover is now both the current panel and the snapshot target.
+        assertFalse(g.canAnimateOutgoing(false));
+        assertFalse(g.covered(open));assertFalse(g.frame(open,true));
+        assertFalse(g.frame(reverse,false));
+        assertTrue(g.covered(reverse));
+        assertFalse(g.frame(reverse,false));assertTrue(g.frame(reverse,false));
+    }
 }

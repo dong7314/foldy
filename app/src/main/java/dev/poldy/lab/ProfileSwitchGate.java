@@ -12,6 +12,7 @@ final class ProfileSwitchGate {
         pending=shielded;return true;
     }
     boolean matches(long token,boolean target){return token==generation&&target==inner;}
+    boolean canReassert(boolean physicalInner){return generation>=0&&(pending||physicalInner==inner);}
     void observe(boolean correct,long now){if(!correct)stableSince=-1;else if(stableSince<0)stableSince=now;}
     boolean canFinish(long token,long now) {
         return token==generation&&(!pending||(now-started>=MIN_SHIELD_MILLIS

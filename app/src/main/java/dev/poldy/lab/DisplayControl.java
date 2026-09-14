@@ -16,17 +16,43 @@ public final class DisplayControl extends IDisplayControl.Stub {
     private final Object stateManager;
     private NativeFrameCapture frameCapture;
     private PanelPower panelPower;
-    private NativeScene scene;
+    private volatile NativeScene scene;
+    private final int ownerUid;
+    private final WindowPrivacyObserver privacy;
+    private volatile IPrivacyListener privacyListener;
+    @Override public boolean onTransact(int code,android.os.Parcel data,android.os.Parcel reply,int flags)
+            throws android.os.RemoteException {
+        if(code!=android.os.IBinder.INTERFACE_TRANSACTION&&!ControlCaller.allowed(
+            android.os.Binder.getCallingUid(),ownerUid,android.os.Process.myUid(),code))
+            throw new SecurityException("Caller is not the Foldy owner");
+        return super.onTransact(code,data,reply,flags);
+    }
+    private void privacyChanged(boolean blocked,long epoch){
+        NativeScene current=scene;if(blocked&&current!=null)current.suppress();
+        android.util.Log.i("PoldyPrivacy","window_policy:blocked="+blocked+", epoch="+epoch);
+        IPrivacyListener listener=privacyListener;
+        if(listener!=null)try{listener.onPrivacyChanged(blocked,epoch);}catch(android.os.RemoteException ignored){}
+    }
+    @Override public void watchPrivacy(IPrivacyListener listener){
+        synchronized(privacy){
+            privacyListener=listener;
+            if(listener!=null)try{listener.onPrivacyChanged(privacy.blocked(),privacy.epoch());}catch(android.os.RemoteException ignored){}
+        }
+    }
     private Object stateCallback;
     private StableDisplay stable;
     private HalAngleReader angles;
+    private PanelLuminanceReader luminance;
     private TaskProfileReader tasks;
     private final ProfileSwitchGate switching=new ProfileSwitchGate();
     private final PanelRotation rotations=new PanelRotation();
 
     @SuppressLint("WrongConstant") // Hidden service constant; this class runs in Shizuku's shell process.
     public DisplayControl(Context context) {
+        try{ownerUid=context.getPackageManager().getApplicationInfo("dev.poldy.lab",0).uid;}
+        catch(android.content.pm.PackageManager.NameNotFoundException e){throw new SecurityException("Foldy owner unavailable",e);}
         stateManager = context.getSystemService("device_state");
+        privacy=new WindowPrivacyObserver(context,ownerUid,this::privacyChanged);
         watchClosedCancellation();
         watchdog.scheduleAtFixedRate(() -> {
             synchronized (this) {
@@ -118,6 +144,7 @@ public final class DisplayControl extends IDisplayControl.Stub {
     private String requestMode(boolean inner,long generation,boolean reassert) {
         try {
           synchronized(this) {
+            if(privacy.blocked())return "PRIVACY_BLOCKED";
             if(reassert&&!switching.matches(generation,inner))return "STALE";
             if(!reassert&&generation<=switching.generation)return "STALE";
             if (innerId < 0 || outerId < 0) return "화면 상태 검증이 필요합니다.";
@@ -126,13 +153,18 @@ public final class DisplayControl extends IDisplayControl.Stub {
                 return "다른 화면 상태 요청이 있어 중단했습니다.";
             int desired = inner ? innerId : outerId;
             if(ownedState<0&&stable==null) {
-                if(!state.contains("name='CLOSED'"))return "이번 시험은 완전히 접은 상태에서 시작해 주세요.";
+                if(!state.contains("name='CLOSED'")&&!state.contains("name='OPENED'"))return "WAIT_ENDPOINT";
+                if(PhysicalPanels.primaryIsInner()!=inner)return "WAIT_ENDPOINT";
                 if(command("/system/bin/wm","size","-d","0").contains("Override size:"))return "기존 화면 크기 설정이 있어 시험을 중지했습니다.";
             }
+            // CLOSED may arrive before the app's covered reversal reaches Binder.
+            // Leave its scene and lease intact; that next generation owns the remap.
+            if(reassert&&scene!=null&&!switching.canReassert(PhysicalPanels.primaryIsInner()))return "WAIT_COVER";
             observeRotationPreferences();
             settling = false;
             leaseUntil = SystemClock.elapsedRealtime() + 4000;
             if(stable==null) {
+                if(luminance==null)luminance=new PanelLuminanceReader();
                 String apk=command("/system/bin/pm","path","dev.poldy.lab").trim();
                 if(!apk.startsWith("package:")||apk.contains("\n"))throw new IllegalStateException("Unexpected APK path");
                 stable=new StableDisplay(apk.substring(8),rotations.panelMode(true),rotations.panelMode(false));
@@ -140,8 +172,7 @@ public final class DisplayControl extends IDisplayControl.Stub {
             // CLOSED can cancel the concurrent request while the cover is already primary.
             // Reasserting that same profile must not move an idle transparent panel to a private stack.
             boolean shielding=scene!=null&&(switching.pending||PhysicalPanels.primaryIsInner()!=inner);
-            if(reassert&&shielding&&!switching.pending)
-                throw new IllegalStateException("Unexpected profile cancellation outside a covered transfer");
+            if(reassert&&shielding&&!switching.pending)return "WAIT_COVER";
             if(!reassert)switching.begin(generation,inner,SystemClock.elapsedRealtime(),shielding);
             if(panelPower==null)panelPower=new PanelPower();
             // The endpoint lease keeps logical display 1 OFF. Turn both logical
@@ -164,6 +195,7 @@ public final class DisplayControl extends IDisplayControl.Stub {
             while(SystemClock.elapsedRealtime()<until) {
                 synchronized(this) {
                     if(!switching.matches(generation,inner)||stable==null)return "STALE";
+                    if(privacy.blocked())return "PRIVACY_BLOCKED";
                     if(!stable.unlocked())throw new IllegalStateException("Locked during profile change");
                     boolean ready=stable.profileReady(inner);switching.observe(ready,SystemClock.elapsedRealtime());
                     if(ready){
@@ -211,11 +243,13 @@ public final class DisplayControl extends IDisplayControl.Stub {
         try {
             synchronized(this) {
                 if(innerId<0 || outerId<0)throw new IllegalStateException("Model verification required");
+                if(privacy.blocked())return privacyFrame();
                 if(scene!=null)scene.route(PhysicalPanels.primaryIsInner());
                 if(frameCapture==null)frameCapture=new NativeFrameCapture();
             }
             synchronized(this) {
-                if(stable==null)return frameCapture.capture(inner,excluded); // Standalone capture diagnostics.
+                if(stable==null||privacy.blocked())return privacyFrame();
+                long privacyEpoch=privacy.epoch();
                 if(!stable.unlocked())throw new IllegalStateException("Display locked");
                 if(tasks==null)tasks=new TaskProfileReader();
                 boolean profileReady=stable.profileReady(switching.inner);
@@ -226,11 +260,13 @@ public final class DisplayControl extends IDisplayControl.Stub {
                 // 2448x1848 and 1248x1972 in every app orientation).
                 CapturedFrame result=frameCapture.capture(stable.isInner(),excluded);
                 try {
+                    if(privacy.blocked()||privacyEpoch!=privacy.epoch()){result.close();return privacyFrame();}
                     TaskProfileReader.Profile after=tasks.read();
                     result.generation=switching.generation;result.inner=stable.isInner();
                     boolean same=before.owner()!=null&&before.equals(after);
                     result.owner=same?after.owner():null;
                     result.nativeReady=profileReady&&same&&after.ready()&&after.inner()==result.inner;
+                    if(privacy.blocked()||privacyEpoch!=privacy.epoch()){result.close();return privacyFrame();}
                     return result;
                 }catch(Exception e){result.close();throw e;}
             }
@@ -241,9 +277,14 @@ public final class DisplayControl extends IDisplayControl.Stub {
             if(excluded!=null)for(android.view.SurfaceControl layer:excluded)if(layer!=null)layer.release();
         }
     }
+    private CapturedFrame privacyFrame(){
+        NativeScene current=scene;if(current!=null)current.suppress();
+        CapturedFrame result=new CapturedFrame();result.error="PRIVACY_BLOCKED";return result;
+    }
     @Override public synchronized android.view.SurfaceControl[] createScene(boolean inner) {
-        if(ownedState<0||SystemClock.elapsedRealtime()>=leaseUntil)return null;
-        try {if(scene!=null)scene.close();scene=new NativeScene(PhysicalPanels.primaryIsInner());return scene.copies();}
+        if(privacy.blocked()||ownedState<0||SystemClock.elapsedRealtime()>=leaseUntil)return null;
+        try {if(scene!=null)scene.close();scene=new NativeScene(PhysicalPanels.primaryIsInner(),luminance);
+            if(privacy.blocked()){scene.suppress();scene.close();scene=null;return null;}return scene.copies();}
         catch(Exception e){if(scene!=null)scene.close();scene=null;android.util.Log.e("PoldyControl","scene_create_failed",e);return null;}
     }
     @Override public synchronized void routeScene(boolean inner) {
@@ -286,7 +327,7 @@ public final class DisplayControl extends IDisplayControl.Stub {
         }
     }
     @Override public synchronized void reset() {resetInternal(true);}
-    @Override public synchronized void sleep() {resetInternal(false);}
+    @Override public synchronized void sleep() {if(scene!=null)scene.suppress();resetInternal(false);}
     private void resetInternal(boolean keepActivePanelAwake) {
         switching.reset();
         stopAngles();
@@ -317,6 +358,7 @@ public final class DisplayControl extends IDisplayControl.Stub {
         if(retiring!=null)retiring.close();
         boolean routeRestored=true;
         if(scene!=null){routeRestored=scene.closeRestoring();scene=null;}
+        if(luminance!=null){luminance.close();luminance=null;}
         if(panelPower!=null){if(keepActivePanelAwake)panelPower.releaseGracefully();else panelPower.release();}
         if(retiring!=null){
             if(stateRestored&&rotationRestored&&routeRestored)retiring.disarm();
@@ -325,6 +367,6 @@ public final class DisplayControl extends IDisplayControl.Stub {
         if(keepActivePanelAwake)rotations.clear();
     }
     @Override public void destroy() {
-        reset(); watchdog.shutdownNow(); System.exit(0);
+        privacy.close();reset(); watchdog.shutdownNow(); System.exit(0);
     }
 }

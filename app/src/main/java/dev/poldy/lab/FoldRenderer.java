@@ -12,6 +12,9 @@ final class FoldRenderer implements AutoCloseable {
     private final Paint maskPaint=new Paint(),shadePaint=new Paint(),backgroundPaint=new Paint();
     private final Matrix transform=new Matrix();
     private final boolean optimized;
+    private final FoldViewMotion viewMotion=new FoldViewMotion();
+    private static final int[] REDUCED_DIVISORS={2,8,32},FULL_DIVISORS={1,4,16};
+    private final RenderNode[] diffusion={fine,medium,deep};
 
     /*
      * Apple's WebGL material samples an 8-level mip chain twice with a continuous LOD.
@@ -25,17 +28,22 @@ final class FoldRenderer implements AutoCloseable {
         uniform float envelope;
         uniform float veil;
         uniform float band;
+        uniform float2 view;
         half4 main(float2 p) {
             float x=clamp(p.x/size.x,0.0,1.0);
-            float distanceToWipe=inner>0.5?1.0-x:x;
+            float distanceToWipe=(inner>0.5?1.0-x:x)+view.x*(p.y/size.y-0.5)*0.06+view.y*0.015;
             float low=inner>0.5?0.45:0.0;
             float high=inner>0.5?1.0:0.9;
             float source=clamp(((distanceToWipe-low)/(high-low))
-                *wipeAmount*envelope*2.5,0.0,1.0);
-            float blurArea=max(source/0.75,veil*0.72);
-            float a=band<0.5?smoothstep(0.015,0.20,blurArea)
-                :(band<1.5?smoothstep(0.18,0.68,blurArea)
-                :smoothstep(0.62,1.12,blurArea));
+                *wipeAmount*envelope*2.75,0.0,1.0);
+            // A shallow first layer removes the cover's ruler-straight unblurred strip.
+            // The inner stationary half retains native detail.
+            float spread=inner>0.5?1.0-smoothstep(0.48,0.62,x):1.0;
+            float onset=smoothstep(0.0,0.08,wipeAmount*envelope);
+            float blurArea=max(source/0.75+spread*onset*0.025,veil*0.72);
+            float a=band<0.5?smoothstep(0.001,0.16,blurArea)
+                :(band<1.5?smoothstep(0.16,0.70,blurArea)
+                :smoothstep(0.58,1.16,blurArea));
             return half4(half(a));
         }
         """);
@@ -46,6 +54,7 @@ final class FoldRenderer implements AutoCloseable {
         uniform float brightness;
         uniform float inner;
         uniform float envelope;
+        uniform float2 view;
         half4 main(float2 p) {
             float x=clamp(p.x/size.x,0.0,1.0);
             float y=clamp(p.y/size.y,0.0,1.0);
@@ -58,12 +67,14 @@ final class FoldRenderer implements AutoCloseable {
             float source=clamp(((distanceToWipe-blurLow)/(blurHigh-blurLow))
                 *wipeAmount*2.5,0.0,1.0);
             float blurArea=source/0.75;
-            float horizontal=1.0-smoothstep(0.9,1.3,blurArea);
-            float vertical=1.0-smoothstep(0.9,1.0,abs(y-0.5)*2.0);
+            float horizontal=1.0-0.85*smoothstep(0.62,1.48,blurArea);
+            // Broad feather: tilt shifts the shading without exposing a geometric hole.
+            float vertical=1.0-0.70*smoothstep(0.66,1.10,abs(y-0.5-view.y*0.025)*2.0);
             // The real device already supplies the 3D screen edge. Fade the reference's
             // texture-edge shading in only where its diffusion is active.
             float edges=mix(1.0,horizontal*vertical,clamp(blurArea,0.0,1.0));
-            float emitted=mix(1.0,brightness*wipe*edges,envelope);
+            float viewShade=1.0-clamp(blurArea,0.0,1.0)*(abs(view.y)*0.045+view.x*(y-0.5)*0.035);
+            float emitted=mix(1.0,brightness*wipe*edges*viewShade,envelope);
             return half4(0.0,0.0,0.0,half(1.0-emitted));
         }
         """);
@@ -79,29 +90,31 @@ final class FoldRenderer implements AutoCloseable {
         deep.setRenderEffect(RenderEffect.createBlurEffect(2,2,Shader.TileMode.CLAMP));
     }
 
-    // Perspective and crease geometry are already produced by the physical folding panel.
-    // Applying the web model's camera projection again caused the artificial black wedges.
-    void attitude(float pitch,float yaw,float roll){}
-    void orientation(float x,float y,float flat){}
+    void attitude(float pitch,float yaw,float roll){viewMotion.attitude(pitch,yaw,roll);}
+    void orientation(float x,float y,float flat){viewMotion.orientation(x,y,flat);}
 
     void draw(Canvas out,int w,int h,Bitmap before,Bitmap current,float mix,
               FoldOptics.Pose pose,float envelope,float veil) {
         if(current==null||current.isRecycled())return;
         float effect=FoldOptics.clamp(envelope,0,1);
         float protection=FoldOptics.clamp(veil*effect,0,1);
+        FoldViewMotion.Pose view=viewMotion.at(pose,effect);
         content.setPosition(0,0,w,h);RecordingCanvas c=content.beginRecording(w,h);
         c.drawColor(Color.rgb(3,5,8));
+        int positioned=c.save();
+        c.translate(view.dx()*w,view.dy()*h);c.scale(view.scale(),view.scale(),w*.5f,h*.5f);
         if(before!=null&&!before.isRecycled()&&mix<1){
             drawBitmap(c,before,w,h,255);drawBitmap(c,current,w,h,Math.round(255*mix));
         }else drawBitmap(c,current,w,h,255);
-        content.endRecording();
+        c.restoreToCount(positioned);content.endRecording();
 
         out.drawRect(0,0,w,h,backgroundPaint);out.drawRenderNode(content);
         if(effect<=0&&protection<=0)return;
 
-        int[] divisors=optimized?new int[]{2,8,32}:new int[]{1,4,16};
-        RenderNode[] nodes={fine,medium,deep};
+        int[] divisors=optimized?REDUCED_DIVISORS:FULL_DIVISORS;
+        RenderNode[] nodes=diffusion;
         uniforms(mask,w,h,pose,effect);mask.setFloatUniform("veil",protection);
+        mask.setFloatUniform("view",view.x(),view.y());
         for(int band=0;band<nodes.length;band++){
             recordDiffuse(nodes[band],divisors[band],w,h);
             mask.setFloatUniform("band",band);
@@ -111,6 +124,7 @@ final class FoldRenderer implements AutoCloseable {
         shade.setFloatUniform("size",w,h);shade.setFloatUniform("wipeAmount",pose.wipeAmount());
         shade.setFloatUniform("inner",pose.inner()?1:0);shade.setFloatUniform("envelope",effect);
         shade.setFloatUniform("brightness",FoldOptics.emissiveBrightness(pose));
+        shade.setFloatUniform("view",view.x(),view.y());
         out.drawRect(0,0,w,h,shadePaint);
     }
 

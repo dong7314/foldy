@@ -2,6 +2,14 @@ package dev.poldy.lab;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public class AngleSmootherTest {
+    @org.junit.Test public void resumeOnOpenPanelDoesNotSweepFromClosed(){
+        AngleSmoother smoother=new AngleSmoother();smoother.reset(180);
+        org.junit.Assert.assertEquals(180,smoother.step(1000),0);
+        org.junit.Assert.assertTrue(smoother.settled());
+        smoother.measuredTarget(170,1_000_000_000L);
+        float next=smoother.step(1016);
+        org.junit.Assert.assertTrue(next<180&&next>179);
+    }
     @Test public void endpointDoesNotDisappearInASingleFrame(){
         AngleSmoother s=new AngleSmoother();s.step(1000);s.target(180,true);
         assertTrue(s.step(1016)<40);assertFalse(s.settled());

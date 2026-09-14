@@ -9,6 +9,8 @@ final class TransferGate {
     private int freshFrames;
     void invalidateFrames(){freshFrames=0;if(phase==Phase.READY)phase=Phase.WAITING_FRAME;}
     long begin(boolean inner){this.inner=inner;freshFrames=0;phase=Phase.COVERING;return ++generation;}
+    /** Snapshot preparation owns the target buffer, including a same-panel reversal. */
+    boolean canAnimateOutgoing(boolean sourceInner){return phase==Phase.COVERING&&sourceInner!=inner;}
     boolean covered(long token){
         if(token!=generation||phase!=Phase.COVERING)return false;
         phase=Phase.WAITING_FRAME;return true;

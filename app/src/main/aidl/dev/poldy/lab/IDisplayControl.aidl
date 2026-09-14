@@ -3,6 +3,7 @@ package dev.poldy.lab;
 import android.view.SurfaceControl;
 import dev.poldy.lab.CapturedFrame;
 import dev.poldy.lab.IHingeAngleListener;
+import dev.poldy.lab.IPrivacyListener;
 
 interface IDisplayControl {
     String capabilities() = 0;
@@ -17,5 +18,6 @@ interface IDisplayControl {
     void stopAngles() = 9;
     String finishMode(boolean inner, long generation) = 10;
     void sleep() = 11;
+    void watchPrivacy(IPrivacyListener listener) = 12;
     void destroy() = 16777114;
 }

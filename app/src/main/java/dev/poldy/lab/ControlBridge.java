@@ -33,10 +33,18 @@ final class ControlBridge {
             }
             if (remote != null) return;
             args = new Shizuku.UserServiceArgs(new ComponentName(context, DisplayControl.class))
-                .daemon(false).processNameSuffix("display_control").debuggable(false).version(68);
+                .daemon(false).processNameSuffix("display_control").debuggable(false).version(80);
             status = "화면 제어 연결 중";
             Shizuku.bindUserService(args, connection);
         } catch (RuntimeException e) { status = "화면 제어 연결 실패: " + e.getClass().getSimpleName(); }
+    }
+    static void watchPrivacy(IPrivacyListener listener,Result callback){
+        worker.execute(()->{
+            String error=null;
+            try{if(remote==null)throw new IllegalStateException("Control disconnected");remote.watchPrivacy(listener);}
+            catch(Exception e){error="보호 창 확인에 실패했습니다.";}
+            String result=error;main.post(()->callback.done(result));
+        });
     }
     static boolean ready() { return remote != null && "READY".equals(status); }
     record FrameInfo(long elapsed,int baseState,String owner,long generation,boolean nativeReady,boolean inner) {}
